@@ -1,10 +1,13 @@
 // One live match: two seats, a planning phase with an optional shared
 // deadline, and the "collect both order sets → resolve → notify" loop.
-// The server is authoritative — clients only ever see buildView() output.
+// Whoever holds this object is authoritative — seats only ever see
+// buildView() output. It has no Node-specific dependencies, so the same
+// class runs on the server (online play) and in the browser (pass-and-play
+// on the static GitHub Pages build, where the "sockets" are in-page shims).
 
-import { createMatch, validateOrders, resolveTurn } from '../shared/engine.js';
-import { buildView } from '../shared/view.js';
-import { RULES } from '../shared/constants.js';
+import { createMatch, validateOrders, resolveTurn } from './engine.js';
+import { buildView } from './view.js';
+import { RULES } from './constants.js';
 
 const SIDES = ['A', 'B'];
 const GRACE_MS = 2500;

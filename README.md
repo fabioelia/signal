@@ -26,6 +26,27 @@ npm test           # headless engine tests + a two-socket end-to-end test
 The only runtime dependency is [`ws`](https://github.com/websockets/ws).
 No build step — the client is plain ES modules served statically.
 
+## GitHub Pages (static build)
+
+Pushes to `main` deploy the client to GitHub Pages via
+`.github/workflows/pages.yml` (tests must pass first). GitHub Pages can only
+serve static files — it cannot run the WebSocket server — so the Pages build
+offers:
+
+- **Pass-and-play (hot-seat):** the full game running entirely in the page.
+  The same `Match` class the server uses runs in-browser with two in-page
+  "sockets"; players hand the device back and forth and a full-screen cover
+  keeps each side's fog private between turns.
+- **Online play against a hosted server:** point the static client at any
+  deployed instance of this repo's server with
+  `…/?server=wss://your-server.example`. (Deploy `npm start` to any Node
+  host — Fly, Railway, Render, a VPS — and Pages becomes a free frontend
+  for it.)
+
+First-time setup: if the workflow's `configure-pages` step fails, enable
+Pages once under **Settings → Pages → Source: "GitHub Actions"** and re-run
+the workflow.
+
 ## How two players connect / join a game
 
 Everything runs over a single WebSocket per player. Three ways to get into a
@@ -79,8 +100,10 @@ shared/constants.js   rule numbers (costs, build times, income, combat)
 shared/map.js         24-region hex map, links, symmetric starting clusters
 shared/engine.js      createMatch / validateOrders / resolveTurn — pure + deterministic
 shared/view.js        buildView(state, side) — the fog-of-war filter
+shared/match.js       one match: seats, planning timer, lock → resolve → sync
+                      (no Node dependencies: the server runs it for online play,
+                      the browser runs it for pass-and-play)
 server/index.js       static hosting + WebSocket lobby (create/join/quick/rejoin)
-server/match.js       one match: seats, planning timer, lock → resolve → sync
 public/               vanilla-JS client (implements the Claude Design handoff)
 test/engine.test.js   headless rules tests (the §8 interplay patterns)
 test/e2e.test.js      real server + two socket clients end to end

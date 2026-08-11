@@ -20,7 +20,7 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { Match } from './match.js';
+import { Match } from '../shared/match.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 const ROOT = fileURLToPath(new URL('..', import.meta.url));

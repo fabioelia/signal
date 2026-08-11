@@ -1,19 +1,37 @@
-// SIGNAL DOMINION client. One WebSocket to the server; the server is
-// authoritative and only ever sends this player's fog-filtered view.
+// SIGNAL DOMINION client. Two ways to play:
+//
+//   Online — one WebSocket to the game server, which is authoritative and
+//   only ever sends this player's fog-filtered view.
+//
+//   Pass-and-play — the same Match class the server uses runs right here in
+//   the page with two in-page "sockets", and the players hand the device
+//   back and forth. This is what works on a static host (GitHub Pages),
+//   where there is no server to talk to. On a static host you can still
+//   play online by pointing the client at a hosted server with
+//   ?server=wss://your-server.example
+//
 // Orders queue up locally during planning and are sent once on "Lock in".
 
-import { NODE_META, RULES, RESOLUTION_STEPS } from '/shared/constants.js';
+import { NODE_META, RULES, RESOLUTION_STEPS } from './shared/constants.js';
+import { Match } from './shared/match.js';
 
 const $app = document.getElementById('app');
+
+const PARAMS = new URLSearchParams(location.search);
+const SERVER_URL = PARAMS.get('server'); // e.g. wss://myserver.example
+const STATIC_HOST = !SERVER_URL && /(^|\.)github\.io$/.test(location.hostname);
+const HERE = location.origin + location.pathname;
 
 const S = {
   conn: 'connecting',
   err: null,
   waitingNote: null,
   joined: null, // {code, side, token}
-  sync: null,   // last sync message from the server
+  sync: null,   // last sync message from the server (or the local match)
   token: localStorage.getItem('sd_token') || null,
   name: localStorage.getItem('sd_name') || '',
+  localSeat: null,    // pass-and-play: which seat is holding the device
+  localHandoff: null, // pass-and-play: seat waiting to take the device
   ui: {
     tab: 'map',
     selected: null,
@@ -36,8 +54,13 @@ let ws = null;
 let retryMs = 800;
 
 function connect() {
+  if (STATIC_HOST) {
+    S.conn = 'static'; // no server here — pass-and-play only
+    render();
+    return;
+  }
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}`);
+  ws = new WebSocket(SERVER_URL || `${proto}//${location.host}`);
   ws.onopen = () => {
     S.conn = 'open';
     S.err = null;
@@ -46,6 +69,7 @@ function connect() {
     render();
   };
   ws.onclose = () => {
+    if (local) return;
     S.conn = 'closed';
     render();
     setTimeout(connect, retryMs);
@@ -58,6 +82,7 @@ function connect() {
 }
 
 function send(msg) {
+  if (local) { routeLocal(msg); return; }
   if (ws?.readyState === 1) ws.send(JSON.stringify(msg));
 }
 
@@ -106,7 +131,79 @@ function handleMessage(msg) {
   render();
 }
 
-connect();
+// --------------------------------------------------------------------------
+// Pass-and-play: run the Match in-page, hand the device back and forth.
+// Each seat gets its own sync stream (fog intact); a full-screen handoff
+// cover hides the board between seats so nobody peeks.
+// --------------------------------------------------------------------------
+
+let local = null; // { match, seats: {A: {sync, pendingResolve}, B: {...}} }
+
+function startLocal(nameA, nameB) {
+  local = { match: new Match('LOCAL', 'relaxed'), seats: { A: {}, B: {} } };
+  S.localSeat = 'A';
+  S.joined = { code: 'LOCAL', side: 'A', token: null };
+  const fakeWs = (side) => ({ readyState: 1, send: (json) => deliverLocal(side, JSON.parse(json)) });
+  local.match.addPlayer(fakeWs('A'), nameA, 'seat-a');
+  local.match.addPlayer(fakeWs('B'), nameB, 'seat-b');
+  local.match.setReady('A', true);
+  local.match.setReady('B', true); // both ready → the match starts immediately
+}
+
+function deliverLocal(side, msg) {
+  if (msg.t !== 'sync') return;
+  const seat = local.seats[side];
+  seat.sync = msg;
+  if (msg.resolved && msg.view) {
+    seat.pendingResolve = { turn: msg.view.turn - 1, log: msg.log || [] };
+  }
+  if (side === S.localSeat && !S.localHandoff) applyLocalSync(side);
+}
+
+function applyLocalSync(side) {
+  const seat = local.seats[side];
+  if (!seat.sync) return;
+  S.sync = seat.sync;
+  if (seat.pendingResolve) {
+    S.ui.pending = [];
+    S.ui.resolve = seat.pendingResolve;
+    seat.pendingResolve = null;
+    const rejects = seat.sync.you?.lockResult?.rejected || [];
+    if (rejects.length) {
+      S.ui.toast = `${rejects.length} order${rejects.length === 1 ? '' : 's'} could not be carried out: ${rejects.map((r) => r.reason).join('; ')}`;
+      setTimeout(() => { S.ui.toast = null; render(); }, 7000);
+    }
+  }
+  if (S.sync.view && !S.ui.selected) S.ui.selected = S.sync.view.you.capital;
+  render();
+}
+
+function routeLocal(msg) {
+  const m = local.match;
+  if (msg.t === 'lock') {
+    m.lockOrders(S.localSeat, msg.orders);
+    // If the turn didn't resolve (the other seat hasn't locked yet), it's
+    // their move — put up the handoff cover.
+    if (m.phase === 'planning' && m.players[S.localSeat].locked) {
+      S.localHandoff = S.localSeat === 'A' ? 'B' : 'A';
+      render();
+    }
+  } else if (msg.t === 'ready') {
+    m.setReady(S.localSeat, msg.ready);
+  }
+}
+
+function takeSeat(side) {
+  S.localSeat = side;
+  S.localHandoff = null;
+  S.ui.pending = [];
+  S.ui.buildMenu = false;
+  S.ui.reinforceMenu = false;
+  S.ui.resolve = null;
+  S.ui.pick = null;
+  S.ui.selected = null;
+  applyLocalSync(side);
+}
 
 // --------------------------------------------------------------------------
 // Small helpers
@@ -236,9 +333,13 @@ function render() {
 }
 
 function renderConnect() {
-  const urlCode = new URLSearchParams(location.search).get('code') || '';
+  const urlCode = PARAMS.get('code') || '';
+  const offline = S.conn === 'static';
+  const offlineNote = offline
+    ? '<div class="body" style="color:#a07a24">This is the static build — there is no game server here, so online play is off. Pass-and-play works right on this page, or point this client at a hosted server with <b>?server=wss://…</b> (see the README).</div>'
+    : '';
   return `
-  <div class="screen">
+  <div class="screen" style="overflow:auto">
     <div class="wordmark"><div class="mark"></div><div class="word">SIGNAL DOMINION</div></div>
     <div class="tagline">Two governments, one network. Plan in private, resolve together — first capital to fall ends it.</div>
     ${S.err ? `<div class="error-note">${esc(S.err)}</div>` : ''}
@@ -257,25 +358,36 @@ function renderConnect() {
         <div class="eyebrow">START A MATCH</div>
         <div class="field">
           <label for="pacing-in">PACING</label>
-          <select id="pacing-in">
+          <select id="pacing-in" ${offline ? 'disabled' : ''}>
             <option value="live">Live · ${RULES.planningSeconds}s per turn</option>
             <option value="relaxed">Relaxed · no timer</option>
           </select>
         </div>
-        <button class="paper-btn primary" data-act="create">Create match</button>
+        <button class="paper-btn primary" data-act="create" ${offline ? 'disabled' : ''}>Create match</button>
         <div class="rule"></div>
         <div class="body">You'll get a 4-letter code and a link to send to your opponent.</div>
-        <button class="paper-btn" data-act="quick">Quick match — pair me with anyone</button>
+        <button class="paper-btn" data-act="quick" ${offline ? 'disabled' : ''}>Quick match — pair me with anyone</button>
+        ${offlineNote}
       </div>
       <div class="paper-card">
         <div class="eyebrow">JOIN A MATCH</div>
         <div class="field">
           <label for="code-in">MATCH CODE</label>
-          <input id="code-in" class="code" maxlength="4" placeholder="XXXX" value="${esc(urlCode)}">
+          <input id="code-in" class="code" maxlength="4" placeholder="XXXX" value="${esc(urlCode)}" ${offline ? 'disabled' : ''}>
         </div>
-        <button class="paper-btn primary" data-act="join">Join with code</button>
+        <button class="paper-btn primary" data-act="join" ${offline ? 'disabled' : ''}>Join with code</button>
         <div class="rule"></div>
         <div class="body">Get the code (or the link) from whoever created the match.</div>
+      </div>
+      <div class="paper-card">
+        <div class="eyebrow">SAME DEVICE</div>
+        <div class="field">
+          <label for="name2-in">SECOND PLAYER</label>
+          <input id="name2-in" maxlength="24" placeholder="e.g. Kestrel">
+        </div>
+        <button class="paper-btn primary" data-act="local">Start pass-and-play</button>
+        <div class="rule"></div>
+        <div class="body">Two players, one screen. You hand the device back and forth; a cover screen keeps each side's fog private. Runs entirely in this page.</div>
       </div>
     </div>
   </div>`;
@@ -286,7 +398,7 @@ function renderLobby() {
   const opp = S.sync.opp;
   const code = S.sync.match.code;
   const pacing = S.sync.match.pacing === 'live' ? `Live · ${RULES.planningSeconds}s per turn` : 'Relaxed · no timer';
-  const shareLink = `${location.origin}/?code=${code}`;
+  const shareLink = `${HERE}?code=${code}`;
   return `
   <div class="screen">
     <div class="wordmark"><div class="mark"></div><div class="word">SIGNAL DOMINION</div></div>
@@ -363,6 +475,20 @@ function renderGame(v) {
     ${renderOrderbar(v)}
     ${S.ui.toast ? `<div class="toast">${esc(S.ui.toast)}</div>` : ''}
     ${v.winner ? (S.ui.hideOver ? '' : renderGameOver(v)) : (S.ui.resolve ? renderResolve(v) : '')}
+    ${S.localHandoff ? renderHandoff() : ''}
+  </div>`;
+}
+
+function renderHandoff() {
+  const name = local?.match.players[S.localHandoff]?.name || 'the other player';
+  return `
+  <div class="overlay" style="background:var(--bg);z-index:90">
+    <div class="resolve-card" style="width:480px;text-align:center;align-items:center">
+      <div style="width:34px;height:34px;border-radius:10px;background:#4a7fe0"></div>
+      <h2>Hand the device to ${esc(name)}</h2>
+      <div class="sub" style="font-size:16px">No peeking — their half of the fog comes up next.</div>
+      <button class="paper-btn primary" style="font-size:17px;padding:13px 32px" data-act="take-seat">I'm ${esc(name)} — show my board</button>
+    </div>
   </div>`;
 }
 
@@ -978,13 +1104,22 @@ $app.addEventListener('click', (ev) => {
       send({ t: 'quick', name });
       break;
     }
+    case 'local': {
+      const p1 = (document.getElementById('name-in')?.value || S.name || '').trim() || 'Player 1';
+      const p2 = (document.getElementById('name2-in')?.value || '').trim() || 'Player 2';
+      S.name = p1;
+      localStorage.setItem('sd_name', p1);
+      startLocal(p1, p2);
+      break;
+    }
+    case 'take-seat': takeSeat(S.localHandoff); break;
     case 'ready': send({ t: 'ready', ready: !S.sync.you.ready }); break;
     case 'leave':
       localStorage.removeItem('sd_token');
-      location.href = location.origin;
+      location.assign(HERE);
       break;
     case 'copy-link':
-      navigator.clipboard?.writeText(`${location.origin}/?code=${S.sync.match.code}`);
+      navigator.clipboard?.writeText(`${HERE}?code=${S.sync.match.code}`);
       el.textContent = 'Copied!';
       break;
     case 'tab': S.ui.tab = arg; S.ui.resolve = null; render(); break;
@@ -1092,3 +1227,5 @@ setInterval(() => {
     lockIn(); // send whatever is queued before the deadline hits
   }
 }, 400);
+
+connect();
