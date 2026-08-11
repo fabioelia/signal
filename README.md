@@ -28,10 +28,22 @@ No build step — the client is plain ES modules served statically.
 
 ## GitHub Pages (static build)
 
-Pushes to `main` deploy the client to GitHub Pages via
-`.github/workflows/pages.yml` (tests must pass first). GitHub Pages can only
-serve static files — it cannot run the WebSocket server — so the Pages build
-offers:
+The client is published to GitHub Pages from the **`gh-pages` branch** —
+live at **https://fabioelia.github.io/signal/**. Re-deploy after changes
+with:
+
+```bash
+./scripts/deploy-pages.sh
+```
+
+(There is also a ready-made GitHub Actions workflow in
+`docs/pages-workflow.yml` that tests + deploys on every push to `main`; to
+adopt it, copy it to `.github/workflows/pages.yml` from a machine whose
+GitHub credentials have `workflow` scope, and set **Settings → Pages →
+Source** to "GitHub Actions".)
+
+GitHub Pages can only serve static files — it cannot run the WebSocket
+server — so the Pages build offers:
 
 - **Pass-and-play (hot-seat):** the full game running entirely in the page.
   The same `Match` class the server uses runs in-browser with two in-page
@@ -43,9 +55,6 @@ offers:
   host — Fly, Railway, Render, a VPS — and Pages becomes a free frontend
   for it.)
 
-First-time setup: if the workflow's `configure-pages` step fails, enable
-Pages once under **Settings → Pages → Source: "GitHub Actions"** and re-run
-the workflow.
 
 ## How two players connect / join a game
 
