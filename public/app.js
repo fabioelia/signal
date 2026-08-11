@@ -160,8 +160,8 @@ function handleMessage(msg) {
 
 let local = null; // { match, ai, seats: {A: {sync, pendingResolve}, B: {...}} }
 
-function startLocal(nameA, nameB, { ai = false, restored = null, map = undefined } = {}) {
-  local = { match: new Match('LOCAL', 'relaxed', restored?.map || map), ai, aiPending: false, seats: { A: {}, B: {} } };
+function startLocal(nameA, nameB, { ai = false, aiLevel = 'ruthless', restored = null, map = undefined } = {}) {
+  local = { match: new Match('LOCAL', 'relaxed', restored?.map || map), ai, aiLevel, aiPending: false, seats: { A: {}, B: {} } };
   S.localSeat = 'A';
   S.localHandoff = null;
   S.joined = { code: 'LOCAL', side: 'A', token: null };
@@ -190,6 +190,7 @@ function saveLocal() {
     localStorage.setItem(SAVE_KEY, JSON.stringify({
       v: VERSION,
       ai: local.ai,
+      aiLevel: local.aiLevel,
       names: { A: local.match.players.A.name, B: local.match.players.B.name },
       state: local.match.state,
     }));
@@ -220,7 +221,7 @@ function deliverLocal(side, msg) {
       local.aiPending = false;
       const m = local?.match;
       if (m && m.phase === 'planning' && !m.players.B.locked && local.seats.B.sync?.view) {
-        m.lockOrders('B', aiOrders(local.seats.B.sync.view));
+        m.lockOrders('B', aiOrders(local.seats.B.sync.view, local.aiLevel));
       }
     }, 60);
   }
@@ -533,6 +534,13 @@ function renderConnect() {
           <input id="name2-in" maxlength="24" placeholder="e.g. Kestrel">
         </div>
         <button class="paper-btn primary" data-act="local">Start pass-and-play</button>
+        <div class="field">
+          <label for="ai-level-in">DAEMON DIFFICULTY</label>
+          <select id="ai-level-in">
+            <option value="ruthless" ${(localStorage.getItem('sd_ai_level') || 'ruthless') === 'ruthless' ? 'selected' : ''}>Ruthless — plays to win</option>
+            <option value="standard" ${localStorage.getItem('sd_ai_level') === 'standard' ? 'selected' : ''}>Standard — a fairer fight</option>
+          </select>
+        </div>
         <button class="paper-btn" data-act="local-ai">Play vs the Daemon (AI)</button>
         <div class="rule"></div>
         ${(() => {
@@ -1665,14 +1673,16 @@ $app.addEventListener('click', (ev) => {
       const p2 = ai ? 'The Daemon' : (document.getElementById('name2-in')?.value || '').trim() || 'Player 2';
       S.name = p1;
       localStorage.setItem('sd_name', p1);
-      startLocal(p1, p2, { ai, map: chosenMap() });
+      const aiLevel = document.getElementById('ai-level-in')?.value || localStorage.getItem('sd_ai_level') || 'ruthless';
+      localStorage.setItem('sd_ai_level', aiLevel);
+      startLocal(p1, p2, { ai, aiLevel, map: chosenMap() });
       break;
     }
     case 'resume-save': {
       const save = loadLocalSave();
       if (!save) break;
       try {
-        startLocal(save.names.A, save.names.B, { ai: save.ai, restored: save.state });
+        startLocal(save.names.A, save.names.B, { ai: save.ai, aiLevel: save.aiLevel || 'ruthless', restored: save.state });
       } catch (e) {
         localStorage.removeItem(SAVE_KEY);
         S.err = 'That save could not be loaded (probably from an older version).';
@@ -1893,7 +1903,7 @@ $app.addEventListener('change', (ev) => {
       const save = JSON.parse(reader.result);
       if (!save?.state?.regions) throw new Error('not a save');
       localStorage.setItem(SAVE_KEY, JSON.stringify(save));
-      startLocal(save.names?.A || 'Player 1', save.names?.B || 'Player 2', { ai: !!save.ai, restored: save.state });
+      startLocal(save.names?.A || 'Player 1', save.names?.B || 'Player 2', { ai: !!save.ai, aiLevel: save.aiLevel || 'ruthless', restored: save.state });
     } catch {
       S.err = 'That file is not a SIGNAL DOMINION save.';
       render();

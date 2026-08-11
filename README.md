@@ -172,6 +172,33 @@ overlay, and used as `step` numbers in the report):
 
 ## Changelog
 
+**v0.8.0** — Daemon v3: an AI that plays the game's own doctrine.
+- The Daemon now runs the interplay patterns from the design document as
+  explicit plays: **economy sieges** (it ranks targets by how much of your
+  network a region cuts off from your capital, not just by what's in it),
+  **feints** (a decoy swarm build aimed where your satellites are watching,
+  cancelled for the 50% refund once your defense commits), **orbital
+  swings** (it holds a wave, kills the satellite watching the corridor with
+  an ASAT, then launches into the blind spot), **two simultaneous fronts**
+  once it's winning, and **organized retreats** — under-committed waves are
+  re-aimed at the softest target it knows instead of being fed to a wall.
+- **It sizes attacks honestly**: waves are budgeted against the defense it
+  expects you to have *when the swarms arrive* (travel time × your training
+  rate), staged from its red-team dens as coordinated volleys instead of a
+  trickle, with a war chest reserved before the economy planners spend.
+- **It plays the long game**: finance hubs now scale with territory held,
+  and the war chest yields to the treasury when the finance network falls
+  behind the curve — a stalled war no longer starves its economy. Worms
+  hunt your deep finance hubs and swing to your capital during the kill.
+- **Difficulty picker** for same-device play: *Ruthless* (all of the
+  above) or *Standard* (smaller chest, no cut-vertex hunting, gentler ops
+  curve). Saved games remember the level.
+- **Benchmarked, not vibes**: a head-to-head harness seats Daemon v3
+  against the frozen v0.6 brain in both seats. It wins both seatings by
+  capital kill (turn ~52 as A, ~70 as B) and the suite fails if it ever
+  loses to its former self or stops beating a passive opponent inside 35
+  turns.
+
 **v0.7.0** — swarm command & control + geographical maps:
 - **Grouped swarm control**: when a tile holds several of your swarms, the
   region panel shows one combined control with a **slider** to choose how

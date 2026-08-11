@@ -2,7 +2,7 @@
 // Used by the server engine, the headless tests, and the browser client
 // (served statically at /shared/constants.js).
 
-export const VERSION = '0.7.0';
+export const VERSION = '0.8.0';
 
 export const NODE_META = {
   CAP: { label: 'Command centre', color: '#e8b53f', tint: '#fbf1d6' },
