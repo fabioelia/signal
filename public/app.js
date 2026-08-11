@@ -19,8 +19,14 @@ import { NODE_META, RULES, RESOLUTION_STEPS, VERSION } from '../shared/constants
 import { Match } from '../shared/match.js';
 import { shortestPath } from '../shared/map.js';
 import { aiOrders } from './ai.js';
+import { icon, logoMark, FAVICON } from './icons.js';
+import { ensureAudio, sfx, soundOn, toggleSound } from './audio.js';
 
 const SAVE_KEY = 'sd_local_save';
+
+document.head.insertAdjacentHTML('beforeend', `<link rel="icon" href="${FAVICON}">`);
+// Browsers unlock audio on the first gesture; after that it's a cheap no-op.
+window.addEventListener('pointerdown', () => ensureAudio());
 
 const $app = document.getElementById('app');
 
@@ -129,6 +135,7 @@ function handleMessage(msg) {
         S.ui.sawMap = S.ui.tab === 'map';
         S.ui.lockConfirm = false;
         S.ui.resolve = { turn: msg.view.turn - 1, log: msg.log || [] };
+        resolveSounds(msg.view, msg.log || []);
         const rejects = msg.you?.lockResult?.rejected || [];
         if (rejects.length) {
           S.ui.toast = `${rejects.length} order${rejects.length === 1 ? '' : 's'} could not be carried out: ${rejects.map((r) => r.reason).join('; ')}`;
@@ -230,6 +237,7 @@ function applyLocalSync(side) {
     S.ui.sawMap = S.ui.tab === 'map';
     S.ui.lockConfirm = false;
     S.ui.resolve = seat.pendingResolve;
+    resolveSounds(seat.sync.view, seat.pendingResolve.log);
     seat.pendingResolve = null;
     const rejects = seat.sync.you?.lockResult?.rejected || [];
     if (rejects.length) {
@@ -405,7 +413,18 @@ function addOrder(o) {
   // Menus stay open on purpose — playtesters kept clicking "+1" and having
   // the menu collapse under them. Selecting a different region closes them.
   S.ui.pending.push(o);
+  sfx('queue');
   render();
+}
+
+// Layered turn-resolution audio: the resolve sweep, then combat noise and
+// threat warnings if the report contains them, then win/lose stingers.
+function resolveSounds(v, log) {
+  sfx('resolve');
+  if (log.some((e) => e.step === 3)) setTimeout(() => sfx('combat'), 450);
+  if (log.some((e) => /worm detected/i.test(e.title))) setTimeout(() => sfx('detect'), 750);
+  if (v?.you?.alerts?.length) setTimeout(() => sfx('alert'), 1000);
+  if (v?.winner) setTimeout(() => sfx(v.winner === v.side ? 'win' : 'lose'), 1300);
 }
 
 function lockIn() {
@@ -452,7 +471,7 @@ function renderConnect() {
     : '';
   return `
   <div class="screen" style="overflow:auto">
-    <div class="wordmark"><div class="mark"></div><div class="word">SIGNAL DOMINION</div></div>
+    <div class="wordmark">${logoMark(34)}<div class="word">SIGNAL DOMINION</div></div>
     <div class="tagline">Two governments, one network. Plan in private, resolve together — first capital to fall ends it. <span style="font-family:var(--mono);font-size:13px;color:#6f7b8d">v${VERSION}</span></div>
     ${S.err ? `<div class="error-note">${esc(S.err)}</div>` : ''}
     ${S.waitingNote ? `<div class="error-note" style="background:#10263e;border-color:#2f5686;color:#cfe2fb">${esc(S.waitingNote)}</div>` : ''}
@@ -525,7 +544,7 @@ function renderLobby() {
   const shareLink = `${HERE}?code=${code}`;
   return `
   <div class="screen">
-    <div class="wordmark"><div class="mark"></div><div class="word">SIGNAL DOMINION</div></div>
+    <div class="wordmark">${logoMark(34)}<div class="word">SIGNAL DOMINION</div></div>
     <div class="card-row">
       <div class="paper-card">
         <div class="eyebrow">YOU</div>
@@ -609,7 +628,7 @@ function renderHandoff() {
   return `
   <div class="overlay" style="background:var(--bg);z-index:90">
     <div class="resolve-card" style="width:480px;text-align:center;align-items:center">
-      <div style="width:34px;height:34px;border-radius:10px;background:#4a7fe0"></div>
+      ${logoMark(34)}
       <h2>Hand the device to ${esc(name)}</h2>
       <div class="sub" style="font-size:16px">No peeking — their half of the fog comes up next.</div>
       <button class="paper-btn primary" style="font-size:17px;padding:13px 32px" data-act="take-seat">I'm ${esc(name)} — show my board</button>
@@ -629,10 +648,11 @@ function renderTopbar(v) {
   return `
   <div class="topbar">
     <div class="brand">
-      <div class="mark"></div>
+      ${logoMark(22, 7)}
       <div class="word">SIGNAL DOMINION</div>
       <div class="code" title="match code">${esc(m.code)}</div>
       <div class="code" title="game version" style="border:none;padding:4px 2px">v${VERSION}</div>
+      <button class="sound-btn" data-act="toggle-sound" title="${soundOn() ? 'Sound on — click to mute' : 'Sound off — click to unmute'}">${icon(soundOn() ? 'soundOn' : 'soundOff', 16, soundOn() ? '#8d99ab' : '#5a6578')}</button>
     </div>
     <div style="display:flex;align-items:center;gap:16px">
       <div class="turn-pill">
@@ -685,10 +705,10 @@ function unitBadges(v, id) {
   const enSw = here.filter((u) => u.type === 'swarm' && u.owner !== mine).reduce((s, u) => s + (u.strength || 0), 0);
   const myWorms = here.filter((u) => u.type === 'worm' && u.owner === mine).length;
   const enWorms = here.filter((u) => u.type === 'worm' && u.owner !== mine).length;
-  if (mySw) parts.push(`<span class="ubadge" style="color:#9dc1f7" title="your swarm, strength ${mySw}">▲${mySw}</span>`);
-  if (enSw) parts.push(`<span class="ubadge" style="color:#f0a58f" title="enemy swarm, strength ${enSw}">▲${enSw}</span>`);
-  if (myWorms) parts.push(`<span class="ubadge" style="color:#c9a8ef" title="your worm${myWorms === 1 ? '' : 's'}">◆${myWorms}</span>`);
-  if (enWorms) parts.push(`<span class="ubadge" style="color:#e8a0d2" title="detected enemy worm — defenders here can intercept it">◆!</span>`);
+  if (mySw) parts.push(`<span class="ubadge" style="color:#9dc1f7" title="your swarm, strength ${mySw}">${icon('swarm', 11)}${mySw}</span>`);
+  if (enSw) parts.push(`<span class="ubadge" style="color:#f0a58f" title="enemy swarm, strength ${enSw}">${icon('swarm', 11)}${enSw}</span>`);
+  if (myWorms) parts.push(`<span class="ubadge" style="color:#c9a8ef" title="your worm${myWorms === 1 ? '' : 's'}">${icon('worm', 12)}${myWorms}</span>`);
+  if (enWorms) parts.push(`<span class="ubadge" style="color:#e8a0d2" title="detected enemy worm — defenders here can intercept it">${icon('worm', 12)}!</span>`);
   // Your in-progress work on this tile, so you don't have to click around:
   // claims/structures/training/repairs at the region, swarm/worm/satellite
   // builds at their facility.
@@ -714,7 +734,7 @@ function renderMap(v) {
     if (own === mine) subline = `${r.garrison ?? 0} def`;
     else if (own) subline = r.visible ? `${r.garrison} def` : '? def';
     const dots = (r.nodes || r.intel?.nodes || []).slice(0, 4)
-      .map((n) => `<i style="background:${NODE_META[n.type].color}"></i>`).join('');
+      .map((n) => icon(n.type, 13, NODE_META[n.type].color, `title="${NODE_META[n.type].label}"`)).join('');
     return `
     <div class="hex" data-act="hex" data-arg="${r.id}" style="left:${r.x}px;top:${r.y}px;background:${stroke}">
       <div class="inner" style="background:${fill}">
@@ -863,7 +883,7 @@ function renderOrbit(v) {
     cards.push(`
     <div class="orbit-card">
       <div class="row">
-        <div class="who"><i style="background:#3f9c78"></i>Watcher over ${esc(regionName(s.region))}</div>
+        <div class="who">${icon('sat', 16, '#3f9c78')}Watcher over ${esc(regionName(s.region))}</div>
         <div class="chip" style="color:#3f9c78;background:#dff2ea">${moving ? `Moving · ${moving.turnsLeft} left` : 'Live'}</div>
       </div>
       <div class="detail">Covers ${esc(footprint(s.region))}. Worms crossing the footprint are spotted, and you see what's really inside it.</div>
@@ -902,7 +922,7 @@ function renderOrbit(v) {
     cards.push(`
     <div class="orbit-card">
       <div class="row">
-        <div class="who"><i style="background:#d8624f"></i>${esc(oppName())}'s eye over ${esc(regionName(s.region))}</div>
+        <div class="who">${icon('sat', 16, '#d8624f')}${esc(oppName())}'s eye over ${esc(regionName(s.region))}</div>
         <div class="chip" style="color:#d8624f;background:#fae0da">Watching you</div>
       </div>
       <div class="detail">Anything you move through ${esc(footprint(s.region))}, they see — including worms.</div>
@@ -1053,7 +1073,7 @@ function renderSidebar(v) {
     }
     return `
     <div class="node-row" title="${esc(nodeEffect(n.type))}">
-      <div class="icon" style="background:${meta.tint}"><i style="background:${meta.color}"></i></div>
+      <div class="icon" style="background:${meta.tint}">${icon(n.type, 19, meta.color)}</div>
       <div class="meta">
         <div class="top"><span class="label">${meta.label}</span><span class="hp-text">${hpText}${repairBtn}</span></div>
         <div class="track"><div class="fill" style="background:${meta.color};width:${pct}%"></div></div>
@@ -1320,7 +1340,7 @@ function renderActions(v, r) {
     if (S.ui.buildMenu && !cutOff && r.reconnecting === 0) {
       out.push(`<div class="sub-actions">${['FIN', 'INF', 'ANL', 'OPS', 'LNC'].map((type) => `
         <button class="paper-btn" style="text-align:left" data-act="build-node" data-arg="${type}" ${left < c.node[type] ? 'disabled' : ''}>
-          <b>${NODE_META[type].label}</b> · §${c.node[type]} · ${t.node[type]} turns<br>
+          <span style="display:inline-flex;align-items:center;gap:7px"><span style="display:inline-flex">${icon(type, 15, NODE_META[type].color)}</span><b>${NODE_META[type].label}</b> · §${c.node[type]} · ${t.node[type]} turns</span><br>
           <span style="font-size:13px;color:var(--paper-muted);font-weight:400">${nodeEffect(type)}</span>
         </button>`).join('')}</div>`);
     }
@@ -1594,6 +1614,7 @@ $app.addEventListener('click', (ev) => {
       S.ui.tab = 'map';
       S.ui.sawMap = true;
       S.ui.lockConfirm = false;
+      sfx('click');
       render();
       break;
     }
@@ -1676,9 +1697,11 @@ $app.addEventListener('click', (ev) => {
         const i = list.findIndex((s) => s.kind === removed.kind && s.region === removed.region);
         if (i >= 0) list.splice(i, 1);
       }
+      sfx('unqueue');
       render();
       break;
     }
+    case 'toggle-sound': ensureAudio(); toggleSound(); render(); break;
     case 'lock':
       // Nudge players who lock straight from the report without re-checking
       // the map — a second click confirms.
@@ -1688,6 +1711,7 @@ $app.addEventListener('click', (ev) => {
         break;
       }
       S.ui.lockConfirm = false;
+      sfx('lock');
       lockIn();
       break;
     case 'see-report': S.ui.resolve = null; S.ui.tab = 'log'; render(); break;

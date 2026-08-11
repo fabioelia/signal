@@ -53,7 +53,10 @@ button:disabled { cursor: default; opacity: .45; }
   position: absolute; inset: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 34px; padding: 24px;
-  background: radial-gradient(120% 90% at 20% 0%, #1b2536 0%, #0e131b 60%);
+  background:
+    repeating-linear-gradient(0deg, rgba(127,168,232,.025) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(90deg, rgba(127,168,232,.025) 0 1px, transparent 1px 34px),
+    radial-gradient(120% 90% at 20% 0%, #1b2536 0%, #0e131b 60%);
 }
 .wordmark { display: flex; align-items: center; gap: 14px; }
 .wordmark .mark { width: 34px; height: 34px; border-radius: 10px; background: var(--blue); }
@@ -167,9 +170,19 @@ button:disabled { cursor: default; opacity: .45; }
 
 .stage {
   flex: 1; position: relative; min-width: 0;
-  background: radial-gradient(110% 80% at 50% 10%, #16202e 0%, #0e131b 70%);
+  background:
+    repeating-linear-gradient(0deg, rgba(127,168,232,.022) 0 1px, transparent 1px 30px),
+    repeating-linear-gradient(90deg, rgba(127,168,232,.022) 0 1px, transparent 1px 30px),
+    radial-gradient(110% 80% at 50% 10%, #16202e 0%, #0e131b 70%);
   overflow: hidden;
 }
+/* A slow, very faint scan band drifting down the display. */
+.stage::after {
+  content: ''; position: absolute; left: 0; right: 0; height: 220px; top: -240px;
+  background: linear-gradient(180deg, transparent, rgba(127,168,232,.045), transparent);
+  animation: sdScan 13s linear infinite; pointer-events: none;
+}
+@keyframes sdScan { from { transform: translateY(0); } to { transform: translateY(calc(100vh + 480px)); } }
 
 .mapwrap { position: absolute; inset: 0; overflow: hidden; }
 .mapscale { position: absolute; left: 0; top: 0; width: 880px; height: 545px; transform-origin: 0 0; }
@@ -177,13 +190,22 @@ button:disabled { cursor: default; opacity: .45; }
 .hex .inner {
   position: absolute; inset: 3px; clip-path: polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 0 14px;
+  /* Sits over the inline background colour: a soft top light + bottom shade. */
+  background-image:
+    radial-gradient(120% 85% at 50% 12%, rgba(255,255,255,.10), rgba(255,255,255,0) 55%),
+    linear-gradient(180deg, rgba(255,255,255,.04), rgba(0,0,0,.20));
+  transition: filter .15s ease;
 }
+.hex:hover .inner { filter: brightness(1.18); }
 .hex .rname { font-size: 14px; font-weight: 600; text-align: center; line-height: 1.15; }
 .hex .dots { display: flex; gap: 4px; }
 .hex .dots i { width: 8px; height: 8px; border-radius: 3px; display: block; }
 .hex .sub { font-size: 12px; font-family: var(--mono); }
 .hex .unitrow { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; }
-.hex .ubadge { font-size: 11px; font-family: var(--mono); border-radius: 6px; padding: 1px 6px; background: rgba(0,0,0,.4); }
+.hex .ubadge {
+  font-size: 11px; font-family: var(--mono); border-radius: 6px; padding: 1px 6px;
+  background: rgba(0,0,0,.4); display: inline-flex; align-items: center; gap: 3px;
+}
 .hex .alert-dot {
   position: absolute; left: 50%; top: 16px; transform: translateX(-50%);
   width: 14px; height: 14px; border-radius: 50%; background: var(--amber);
@@ -272,6 +294,15 @@ button:disabled { cursor: default; opacity: .45; }
 .node-row { display: flex; align-items: center; gap: 12px; }
 .node-row .icon { width: 34px; height: 34px; border-radius: 11px; display: flex; align-items: center; justify-content: center; flex: 0 0 34px; }
 .node-row .icon i { width: 11px; height: 11px; border-radius: 4px; display: block; }
+
+.sound-btn {
+  background: transparent; border: 1px solid var(--line-3); border-radius: 999px;
+  padding: 5px 9px; display: flex; align-items: center; margin-left: 2px;
+}
+.sound-btn:hover { border-color: #42536b; }
+
+.orbit-card .who { gap: 10px; }
+.orbit-card .who svg { flex: 0 0 auto; }
 .node-row .meta { flex: 1; min-width: 0; }
 .node-row .top { display: flex; justify-content: space-between; align-items: baseline; }
 .node-row .label { font-size: 16px; font-weight: 500; }

@@ -172,6 +172,20 @@ overlay, and used as `step` numbers in the report):
 
 ## Changelog
 
+**v0.5.0** — sound & vision:
+- **Music and sound effects, fully synthesized in WebAudio** (no audio
+  files, no licensing): a generative dark-ambient bed — drifting minor pads
+  over a deep root pulse with sparse echoing blips — plus a kit of effects
+  for orders, lock-in, turn resolution, combat, worm detection, threats and
+  win/loss. Speaker toggle in the top bar, preference remembered.
+- **Hand-drawn SVG icon set**: distinct glyphs for all six structures
+  (star command core, coin-stack finance, shield garrison, eye analyst,
+  crosshair red team, dish uplink) plus swarm/worm/satellite marks — on the
+  map tiles, in the region panel, the build menu and unit badges.
+- **Visual polish**: a proper SIGNAL DOMINION logo mark and favicon, subtle
+  circuit-grid backdrop with a slow scan band, hex tiles with light/shade
+  depth and hover response.
+
 **v0.4.0** — third playtest feedback round:
 - **Route lines on the map**: dashed lines show where your units are
   heading, the routes your queued/under-construction attacks will take, and
