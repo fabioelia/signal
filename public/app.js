@@ -12,8 +12,11 @@
 //
 // Orders queue up locally during planning and are sent once on "Lock in".
 
-import { NODE_META, RULES, RESOLUTION_STEPS } from './shared/constants.js';
-import { Match } from './shared/match.js';
+// Imported relative to this module: on the Node server app.js is served at
+// /app.js so this resolves to /shared/…; on GitHub Pages it's
+// /signal/public/app.js so this resolves to /signal/shared/… — both correct.
+import { NODE_META, RULES, RESOLUTION_STEPS } from '../shared/constants.js';
+import { Match } from '../shared/match.js';
 
 const $app = document.getElementById('app');
 

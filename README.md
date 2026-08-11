@@ -28,19 +28,11 @@ No build step — the client is plain ES modules served statically.
 
 ## GitHub Pages (static build)
 
-The client is published to GitHub Pages from the **`gh-pages` branch** —
-live at **https://fabioelia.github.io/signal/**. Re-deploy after changes
-with:
-
-```bash
-./scripts/deploy-pages.sh
-```
-
-(There is also a ready-made GitHub Actions workflow in
-`docs/pages-workflow.yml` that tests + deploys on every push to `main`; to
-adopt it, copy it to `.github/workflows/pages.yml` from a machine whose
-GitHub credentials have `workflow` scope, and set **Settings → Pages →
-Source** to "GitHub Actions".)
+GitHub Pages serves the `main` branch directly (Settings → Pages → deploy
+from branch `main`, root) — live at **https://fabioelia.github.io/signal/**.
+The root `index.html` is the Pages entry point; it loads the same client
+out of `public/` and `shared/`, so every push to `main` redeploys the site
+with no build step.
 
 GitHub Pages can only serve static files — it cannot run the WebSocket
 server — so the Pages build offers:
