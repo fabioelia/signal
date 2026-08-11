@@ -669,6 +669,10 @@ function renderTopbar(v) {
         <span style="font-size:15px">${esc(v.you.name)}</span>
         <span class="funds">§${v.you.funding}</span>
         <span class="delta">${v.you.income >= 0 ? '+' : ''}${v.you.income}/turn</span>
+        <span title="Capital integrity — if this hits 0, you lose" style="display:inline-flex;align-items:center;gap:4px;padding-left:10px;border-left:1px solid var(--line)">
+          ${icon('CAP', 13, v.you.capitalHp >= RULES.combat.capitalHp ? '#8d99ab' : v.you.capitalHp > RULES.combat.capitalHp / 2 ? '#e8b53f' : '#e08585')}
+          <span class="funds" style="color:${v.you.capitalHp >= RULES.combat.capitalHp ? '#8d99ab' : v.you.capitalHp > RULES.combat.capitalHp / 2 ? '#e8b53f' : '#e08585'}">${v.you.capitalHp}</span>
+        </span>
       </div>
       <div class="opp">
         <div class="dot" style="background:#e0803f;${oppPulse}"></div>
@@ -762,10 +766,29 @@ function renderMap(v) {
     ${topAlert ? `
     <div class="threat-card">
       <div class="head"><div class="dot"></div><div class="t">Heads up</div></div>
-      <div class="body">${alertText(topAlert)}</div>
+      <div class="body">${alertText(topAlert)}${topAlert.region && v.regions[topAlert.region]?.owner === mine ? ` <b>${defenseForecast(v.regions[topAlert.region], topAlert)}</b>` : ''}</div>
       <button data-act="focus-threat" data-arg="${esc(topAlert.region || '')}">See my options</button>
     </div>` : ''}
+    ${buildQueueDock(v)}
   </div>`;
+}
+
+// "Will it hold?" — the math the defender is doing in their head, done for
+// them: garrison power vs known incoming strength.
+function defenseForecast(r, a) {
+  const inf = (r.nodes || []).filter((n) => n.type === 'INF').length;
+  const def = (r.garrison || 0) * RULES.combat.botPower + ((r.garrison || 0) > 0 ? inf * RULES.combat.infBonus : 0);
+  if (a.type === 'swarm' && a.strength != null) {
+    if (def > a.strength) return `Your defense is ${def} vs ~${a.strength} incoming — it should hold.`;
+    const add = Math.ceil((a.strength - def) / RULES.combat.botPower) + 1;
+    return `Your defense is ${def} vs ~${a.strength} incoming — it likely FALLS. Add ~${add} defenders, or cut the region off.`;
+  }
+  if (a.type === 'worm') {
+    return (r.garrison || 0) > 0
+      ? `You have ${r.garrison} defender${r.garrison === 1 ? '' : 's'} here — a detected worm gets intercepted on arrival.`
+      : 'No defenders here to intercept it — reinforce now or cut the region off.';
+  }
+  return `Current defense here: ${def}.`;
 }
 
 function alertText(a) {
@@ -779,6 +802,42 @@ function alertText(a) {
     case 'anomaly': return `Something is being built against ${r(a.region)} — type unknown, ~${turns(a.eta)} out. It might also be a bluff.`;
     default: return '';
   }
+}
+
+// The global build queue, always visible on the map: everything in progress
+// with a countdown bar, click to jump to where it's happening.
+function buildQueueDock(v) {
+  const builds = v.you.builds;
+  if (!builds.length && !S.ui.pending.length) return '';
+  const iconFor = (b) => {
+    if (b.kind === 'node' || b.kind === 'repair') return icon(b.type, 13, NODE_META[b.type]?.color || '#8d99ab');
+    if (b.kind === 'swarm') return icon('swarm', 13, '#d8624f');
+    if (b.kind === 'worm') return icon('worm', 13, '#8f5fc7');
+    if (b.kind === 'satellite' || b.kind === 'asat' || b.kind === 'moveSat') return icon('sat', 13, '#c48a1e');
+    if (b.kind === 'bots') return icon('bot', 13, '#4a7fe0');
+    return icon('CAP', 13, '#8d99ab');
+  };
+  const rows = builds.slice(0, 7).map((b) => {
+    const pct = Math.round(((b.totalTurns - b.turnsLeft) / b.totalTurns) * 100);
+    const where = b.facility || b.region;
+    return `
+    <div class="queue-row" data-act="hex" data-arg="${where}">
+      ${iconFor(b)}
+      <div class="q-mid">
+        <div class="q-label">${buildLabel(b)}</div>
+        <div class="q-track"><i style="width:${pct}%"></i></div>
+      </div>
+      <div class="q-eta">${b.turnsLeft}t</div>
+    </div>`;
+  }).join('');
+  const more = builds.length > 7 ? `<div class="q-note">+${builds.length - 7} more in the Funds tab</div>` : '';
+  const queued = S.ui.pending.length ? `<div class="q-note">+${S.ui.pending.length} order${S.ui.pending.length === 1 ? '' : 's'} queued this turn</div>` : '';
+  return `
+  <div class="queue-dock">
+    <div class="q-head">BUILD QUEUE</div>
+    ${rows || '<div class="q-note">Nothing in progress</div>'}
+    ${more}${queued}
+  </div>`;
 }
 
 function renderPickBanner() {
@@ -1118,6 +1177,7 @@ function renderSidebar(v) {
     <div class="warn-card">
       <div class="t">${a.type === 'anomaly' ? 'Something is being built against this region' : a.type === 'swarm' ? `A swarm group is ${a.eta} turn${a.eta === 1 ? '' : 's'} away` : a.type === 'worm' ? `A worm is ${a.eta} turn${a.eta === 1 ? '' : 's'} away` : a.type === 'build' ? `Incoming ${a.buildType} build` : 'Enemy units are inside'}</div>
       <div class="d">${alertText(a).replace(/<[^>]+>/g, '')}</div>
+      ${mine ? `<div class="d" style="font-weight:600">${defenseForecast(r, a)}</div>` : ''}
     </div>`).join('');
 
   const builds = v.you.builds.filter((b) => b.region === id || b.facility === id || b.target === id);

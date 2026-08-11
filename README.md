@@ -172,6 +172,24 @@ overlay, and used as `step` numbers in the report):
 
 ## Changelog
 
+**v0.6.0** — a smarter, harder Daemon + sharper gameplay reads:
+- **Daemon v2.** New doctrine: it reserves a war chest before economic
+  spending, masses simultaneous swarm waves sized against your estimated
+  defense instead of dribbling singles, rallies surviving swarms into the
+  next assault, pushes your capital from mid-game, closes its own defense
+  gaps using alert strength/ETA math, takes the isolation quarantine trade
+  when a worm is about to land unopposed (and reconnects when quiet), aims
+  worms at finance hubs and routes them around your public satellite
+  footprints, scales finance/claims/garrisons/analysts/red-team-dens with
+  the game, and shoots down satellites parked over its land. Empirically
+  pinned: headless benchmarks require it to beat a passive player inside
+  ~20 turns and fight clean AI-vs-AI wars.
+- **Defense forecast**: threat cards now do the math for you — "defense 8
+  vs ~12 incoming — likely FALLS; add 3 defenders or cut it off."
+- **Capital integrity in the top bar**, colored as it drops.
+- **Global build queue dock** on the map: everything in progress with
+  countdown bars; click a row to jump to the region.
+
 **v0.5.0** — sound & vision:
 - **Music and sound effects, fully synthesized in WebAudio** (no audio
   files, no licensing): a generative dark-ambient bed — drifting minor pads

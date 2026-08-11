@@ -240,6 +240,25 @@ button:disabled { cursor: default; opacity: .45; }
   font-weight: 600; font-size: 14px; border-radius: 999px; padding: 8px 16px;
 }
 
+.queue-dock {
+  position: absolute; right: 22px; top: 18px; width: 252px;
+  background: rgba(20,27,38,.92); border: 1px solid var(--line); border-radius: 14px;
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; z-index: 4;
+  max-height: 46%; overflow: auto;
+}
+.queue-dock .q-head { font-size: 11px; letter-spacing: .14em; color: var(--muted); font-weight: 600; }
+.queue-row {
+  display: flex; align-items: center; gap: 9px; cursor: pointer;
+  border-radius: 8px; padding: 3px 4px;
+}
+.queue-row:hover { background: rgba(127,168,232,.08); }
+.queue-row .q-mid { flex: 1; min-width: 0; }
+.queue-row .q-label { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue-row .q-track { height: 4px; border-radius: 99px; background: var(--line); margin-top: 3px; overflow: hidden; }
+.queue-row .q-track i { display: block; height: 100%; border-radius: 99px; background: var(--green-soft); }
+.queue-row .q-eta { font-size: 12px; font-family: var(--mono); color: var(--muted); }
+.queue-dock .q-note { font-size: 12px; color: var(--muted-2); }
+
 .pick-banner {
   position: absolute; left: 50%; top: 18px; transform: translateX(-50%);
   background: #10263e; border: 1px solid #2f5686; color: #cfe2fb;
