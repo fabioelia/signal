@@ -460,6 +460,17 @@ function requeueStanding() {
 // Screens
 // --------------------------------------------------------------------------
 
+// Re-rendering replaces the whole DOM, which would snap every scrollable
+// panel back to the top on each click. Remember where each panel was and put
+// it back — but only while it is showing the same thing (same selected
+// region, same tab); fresh content starts at the top on purpose.
+const SCROLL_PANELS = [
+  ['.sidebar .scroll', () => S.ui.selected || ''],
+  ['.pane', () => S.ui.tab],
+  ['.queue-dock', () => 'dock'],
+];
+let scrollMemo = {};
+
 function render() {
   const v = view();
   let html;
@@ -469,7 +480,23 @@ function render() {
   if (S.conn === 'closed' && !local) {
     html += `<div class="conn-banner">Connection lost — reconnecting…</div>`;
   }
+  // scrollMemo[sel].key was recorded at the end of the previous render, so it
+  // describes what the old DOM is showing; keyOf() now describes what the new
+  // DOM will show (state has already been mutated by the click handler).
+  for (const [sel] of SCROLL_PANELS) {
+    const el = $app.querySelector(sel);
+    if (el && scrollMemo[sel]) scrollMemo[sel].top = el.scrollTop;
+  }
   $app.innerHTML = html;
+  const next = {};
+  for (const [sel, keyOf] of SCROLL_PANELS) {
+    const key = keyOf();
+    const kept = scrollMemo[sel];
+    const el = $app.querySelector(sel);
+    if (el && kept?.top && kept.key === key) el.scrollTop = kept.top;
+    next[sel] = { key, top: 0 };
+  }
+  scrollMemo = next;
   afterRender();
 }
 

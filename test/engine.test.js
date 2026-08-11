@@ -403,3 +403,46 @@ test('fog: view hides what it should', async () => {
   const enemySwarm = viewA3.units.find((u) => u.type === 'swarm' && u.owner === 'B');
   if (enemySwarm) assert.equal(enemySwarm.path, null, 'enemy paths stay hidden');
 });
+
+test('capturing an undefended region costs the attacker a toll', () => {
+  let state = createMatch();
+  const bRegion = Object.values(state.regions)
+    .find((r) => r.owner === 'B' && !r.nodes.some((n) => n.type === 'CAP'));
+  // Empty the region of defenders and land a full-strength swarm on it.
+  state.units = state.units.filter((u) => !(u.owner === 'B' && u.region === bRegion.id));
+  state.units.push({ id: state.nextId++, owner: 'A', type: 'swarm', region: bRegion.id, target: bRegion.id, path: [], strength: RULES.combat.swarmStrength });
+  ({ state } = turn(state));
+  assert.equal(state.regions[bRegion.id].owner, 'A', 'region flipped');
+  const left = state.units
+    .filter((u) => u.owner === 'A' && u.type === 'swarm' && u.region === bRegion.id)
+    .reduce((s, u) => s + u.strength, 0);
+  const min = RULES.combat.swarmStrength - RULES.combat.captureToll - 1; // toll + possible luck
+  const max = RULES.combat.swarmStrength - RULES.combat.captureToll;
+  assert.ok(left >= min && left <= max, `survivor strength ${left} outside toll range [${min}, ${max}]`);
+});
+
+test('a spent swarm burns out taking ground: no capture, no survivor', () => {
+  let state = createMatch();
+  const bRegion = Object.values(state.regions)
+    .find((r) => r.owner === 'B' && !r.nodes.some((n) => n.type === 'CAP'));
+  state.units = state.units.filter((u) => !(u.owner === 'B' && u.region === bRegion.id));
+  state.units.push({ id: state.nextId++, owner: 'A', type: 'swarm', region: bRegion.id, target: bRegion.id, path: [], strength: 1 });
+  ({ state } = turn(state));
+  assert.equal(state.regions[bRegion.id].owner, 'B', 'a burned-out assault must not flip the region');
+  assert.equal(state.units.filter((u) => u.owner === 'A' && u.type === 'swarm').length, 0);
+});
+
+test('the capture toll is deterministic for a given seed', () => {
+  const play = (seed) => {
+    let state = createMatch(undefined, undefined, seed);
+    const bRegion = Object.values(state.regions)
+      .find((r) => r.owner === 'B' && !r.nodes.some((n) => n.type === 'CAP'));
+    state.units = state.units.filter((u) => !(u.owner === 'B' && u.region === bRegion.id));
+    state.units.push({ id: state.nextId++, owner: 'A', type: 'swarm', region: bRegion.id, target: bRegion.id, path: [], strength: RULES.combat.swarmStrength });
+    ({ state } = turn(state));
+    return state.units
+      .filter((u) => u.owner === 'A' && u.type === 'swarm')
+      .reduce((s, u) => s + u.strength, 0);
+  };
+  assert.equal(play(1234), play(1234), 'same seed, same toll');
+});

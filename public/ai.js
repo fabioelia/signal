@@ -157,7 +157,7 @@ export function aiOrders(view, level = 'ruthless') {
   const finBuilt = countNodes('FIN')
     + view.you.builds.filter((b) => b.kind === 'build_node' && b.type === 'FIN').length;
   const finTarget = Math.min(Math.max(8, mine.length - 2), 3 + Math.floor(view.turn / 4));
-  const chestCap = ruthless ? 4 * c.swarm : 3 * c.swarm;
+  const chestCap = ruthless ? 5 * c.swarm : 3 * c.swarm;
   // Only ease off against an opponent still going concern-sized: a small or
   // collapsing enemy gets finished with the full chest instead.
   const chestShare = finBuilt < finTarget && enemyRegions.length > 7 ? 0.35 : ruthless ? 0.55 : 0.45;
@@ -211,7 +211,7 @@ export function aiOrders(view, level = 'ruthless') {
   }
   const opsCount = countNodes('OPS');
   const opsWanted = ruthless
-    ? (view.turn >= 14 ? 4 : view.turn >= 8 ? 3 : view.turn >= 4 ? 2 : 1)
+    ? (view.turn >= 12 ? 4 : view.turn >= 6 ? 3 : view.turn >= 3 ? 2 : 1)
     : (view.turn >= 12 ? 3 : view.turn >= 5 ? 2 : 1);
   if (opsCount < opsWanted) {
     const together = mine.find((r) => nodesIn(r, 'OPS') && slots(r));
@@ -222,14 +222,26 @@ export function aiOrders(view, level = 'ruthless') {
   // ---- Phase 3: military --------------------------------------------------
   budget += warChest;
   const capR = view.regions[myCap];
-  if ((capR.garrison || 0) < 4 && nodesIn(capR, 'INF') && spend(c.bot * 2)) {
-    orders.push({ kind: 'train_bots', region: myCap, count: 2 });
+  const capFloor = ruthless ? 5 : 4;
+  if ((capR.garrison || 0) < capFloor && nodesIn(capR, 'INF')) {
+    const want = Math.min(3, capFloor - (capR.garrison || 0));
+    if (spend(c.bot * want)) orders.push({ kind: 'train_bots', region: myCap, count: want });
   }
-  for (const r of frontier.slice(0, 3)) {
-    const floor = 2 + Math.min(2, ruthless ? r.cut : 0); // chokepoints get real garrisons
+  // Standing defense has a budget: bots cost upkeep every turn, and an army
+  // of idle garrisons is how a war chest starves. Floors apply while the
+  // total stays inside the cap; emergencies (the alert-gap math above)
+  // ignore it.
+  let botTotal = mine.reduce((s, r) => s + (r.garrison || 0), 0);
+  const botCap = ruthless ? 18 : 14;
+  for (const r of frontier.slice(0, ruthless ? 4 : 3)) {
+    if (botTotal >= botCap) break;
+    const floor = ruthless ? 2 + Math.min(3, r.cut) : 2; // chokepoints get real garrisons
     if ((avail[r.id] || 0) < floor && nodesIn(r, 'INF') && !r.isolated && !r.reconnecting) {
-      const want = Math.min(2, floor - (avail[r.id] || 0));
-      if (spend(c.bot * want)) orders.push({ kind: 'train_bots', region: r.id, count: want });
+      const want = Math.min(3, floor - (avail[r.id] || 0), botCap - botTotal);
+      if (want > 0 && spend(c.bot * want)) {
+        orders.push({ kind: 'train_bots', region: r.id, count: want });
+        botTotal += want;
+      }
     }
   }
 
@@ -267,9 +279,12 @@ export function aiOrders(view, level = 'ruthless') {
 
   // Plan correction: swarm builds aimed at anything other than the chosen
   // target refund half and free the den — this is also how feints resolve.
+  // Builds aimed at known-soft regions are spared: those are raids, and a
+  // raid on an empty region is always worth finishing.
+  const softSpot = (id) => enemyOwned.has(id) && enemyDefEstimate(view.regions[id]) <= 2;
   if (ruthless) {
     for (const b of buildingSwarms) {
-      if (b.target !== target && b.turnsLeft >= 1) {
+      if (b.target !== target && !softSpot(b.target) && b.turnsLeft >= 1) {
         orders.push({ kind: 'cancel_build', build: b.id });
         opsFree += 1;
       }
@@ -292,7 +307,8 @@ export function aiOrders(view, level = 'ruthless') {
     const den0 = mine.find((r) => nodesIn(r, 'OPS'));
     const travel = den0 ? dist(den0.id, target) : 3;
     const anticipation = ruthless ? Math.min(capitalPush ? 18 : 12, travel * 3) : 0;
-    const required = targetDef + 7 + anticipation;
+    // +3 cushion: capture tolls bleed a wave even when nothing defends.
+    const required = targetDef + 7 + anticipation + 3;
 
     // The orbital swing: if their satellite watches the corridor, kill the
     // eye first and hold the wave until it's about to come down.
@@ -349,13 +365,31 @@ export function aiOrders(view, level = 'ruthless') {
     }
 
     // The second front: with dens to spare, open a distant secondary threat
-    // so the defense has to split.
+    // so the defense has to split. Soft regions preferred — those survive
+    // plan correction and actually land.
     if (ruthless && goForThroat && opsFree > 0 && budget > 260) {
-      const secondary = scored.find((s) => s.id !== target && dist(s.id, target) >= 3);
+      const secondary = scored.find((s) => s.id !== target && dist(s.id, target) >= 3 && softSpot(s.id))
+        || scored.find((s) => s.id !== target && dist(s.id, target) >= 3);
       if (secondary && spend(c.swarm)) {
         orders.push({ kind: 'build_swarm', target: secondary.id });
         opsFree -= 1;
       }
+    }
+  }
+
+  // Opportunist raids: a known-soft enemy region draws a lone raider —
+  // cheap, brutal against a thinly-held rear, and it forces the defense to
+  // be everywhere at once. One raid in flight at a time, and never at the
+  // cost of the main wave's dens (opsFree >= 2).
+  if (ruthless && view.turn >= 8 && opsFree >= 2 && budget > c.swarm + 40) {
+    const raiding = buildingSwarms.some((b) => b.target !== target && softSpot(b.target))
+      || mySwarms.some((u) => u.target !== target && softSpot(u.target));
+    const raid = raiding ? null : enemyRegions
+      .filter((r) => r.id !== target && softSpot(r.id) && committedTo(r.id) === 0)
+      .sort((a, b) => (nodesIn(b, 'FIN') + intelNodes(b, 'FIN')) - (nodesIn(a, 'FIN') + intelNodes(a, 'FIN')))[0];
+    if (raid && spend(c.swarm)) {
+      orders.push({ kind: 'build_swarm', target: raid.id });
+      opsFree -= 1;
     }
   }
 
@@ -396,6 +430,17 @@ export function aiOrders(view, level = 'ruthless') {
       orders.push({ kind: 'build_satellite', target: target || enemyCap });
     } else if (nuisance && budget > 260 && spend(c.asat)) {
       orders.push({ kind: 'build_asat', targetSat: nuisance.id });
+    }
+  }
+
+  // Spare cash never idles: bank beyond the next wave deepens the frontier
+  // garrisons a little — inside the same standing-army cap as the floors.
+  if (ruthless && budget > 240 && botTotal < botCap) {
+    for (const r of frontier.slice(0, 3)) {
+      if (botTotal >= botCap || (avail[r.id] || 0) >= 4 || !nodesIn(r, 'INF') || r.isolated || r.reconnecting) continue;
+      if (budget <= 240 || !spend(c.bot)) break;
+      orders.push({ kind: 'train_bots', region: r.id, count: 1 });
+      botTotal += 1;
     }
   }
 

@@ -89,7 +89,13 @@ export class Match {
   }
 
   start() {
-    this.state = createMatch({ A: this.players.A.name, B: this.players.B.name }, this.mapId);
+    // Seed the deterministic luck rolls from the clock at creation — the
+    // engine itself stays pure (the seed lives in state from here on).
+    this.state = createMatch(
+      { A: this.players.A.name, B: this.players.B.name },
+      this.mapId,
+      Date.now() >>> 0,
+    );
     this.phase = 'planning';
     this.startPlanning();
   }

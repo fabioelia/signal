@@ -172,6 +172,25 @@ overlay, and used as `step` numbers in the report):
 
 ## Changelog
 
+**v0.9.0** — capture tolls, a steadier hand in the UI, and a meaner Daemon.
+- **Taking ground is never free**: swarms that overrun a region — or grind
+  a capital siege — now lose 1 strength even when nobody defends, and
+  sometimes a second point when the local resistance gets lucky. The luck
+  is seeded per match and fully deterministic (same state, same result), so
+  replays and tests still reproduce exactly. A spent swarm can burn out
+  taking a region and fail to hold it.
+- **The right panel keeps your place**: clicking an option no longer snaps
+  the sidebar (or the Funds/Intel/Report pages, or the build-queue dock)
+  back to the top. Scroll position survives re-renders while you're looking
+  at the same thing; picking a different region still starts at the top.
+- **The Daemon fights harder**: earlier red-team dens, a bigger war chest,
+  deeper chokepoint garrisons around its capital and frontier (inside a
+  standing-army cap so upkeep never strangles it), waves sized to absorb
+  capture tolls — and **opportunist raids**: leave a region thinly held and
+  a lone raider will come for it while the main wave masses elsewhere.
+  Benchmarks re-tuned: it still beats its v0.6 self in both seatings and
+  crushes a passive opponent inside 35 turns, now under toll rules.
+
 **v0.8.0** — Daemon v3: an AI that plays the game's own doctrine.
 - The Daemon now runs the interplay patterns from the design document as
   explicit plays: **economy sieges** (it ranks targets by how much of your

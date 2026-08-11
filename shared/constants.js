@@ -2,7 +2,7 @@
 // Used by the server engine, the headless tests, and the browser client
 // (served statically at /shared/constants.js).
 
-export const VERSION = '0.8.0';
+export const VERSION = '0.9.0';
 
 export const NODE_META = {
   CAP: { label: 'Command centre', color: '#e8b53f', tint: '#fbf1d6' },
@@ -49,6 +49,11 @@ export const RULES = {
     wormNodeDamage: 100, // non-capital payload destroys the node
     capitalHp: 30,
     nodeHp: 100,
+    // Taking ground is never free: overrunning a region or grinding a siege
+    // costs the attacking force strength even when nobody defends — one
+    // point always, sometimes a second when the local resistance gets lucky.
+    captureToll: 1,
+    captureTollLuck: 0.35,
   },
   reconnectTurns: 2,   // isolation lifts after this many turns of "reconnecting"
   starveGrace: 2,      // turns cut off before degradation starts

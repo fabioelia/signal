@@ -3,7 +3,9 @@
 // The whole game is a pure function: resolveTurn(state, {A: orders, B: orders})
 // returns the next state plus per-player logs. No randomness, no clocks — the
 // same state and orders always produce the same result, so the server, tests
-// and any future replay system all share this file.
+// and any future replay system all share this file. "Luck" (capture tolls)
+// comes from a hash of the match seed, turn and place — reproducible, but
+// unpredictable at the table.
 //
 // Resolution order within a turn (documented, always identical):
 //   1. isolation toggles and reconnection countdowns
@@ -20,18 +22,32 @@ import { RULES, WORM_TARGET_PRIORITY } from './constants.js';
 const SIDES = ['A', 'B'];
 export const enemyOf = (side) => (side === 'A' ? 'B' : 'A');
 
+// Deterministic "luck": an FNV-1a hash of the match seed, the turn and a salt
+// (usually a region id). The same state always rolls the same way, so
+// resolution stays a pure function — but at the table it feels like chance.
+function luckRoll(state, salt, chance) {
+  let h = (2166136261 ^ (state.seed || 0)) >>> 0;
+  const s = `${state.turn}|${salt}`;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 8) % 1000) < chance * 1000;
+}
+
 const clone = (v) => structuredClone(v);
 
 // ---------------------------------------------------------------------------
 // State construction
 // ---------------------------------------------------------------------------
 
-export function createMatch(names = { A: 'Player A', B: 'Player B' }, mapId = DEFAULT_MAP) {
+export function createMatch(names = { A: 'Player A', B: 'Player B' }, mapId = DEFAULT_MAP, seed = 0) {
   const M = mapDef(mapId);
   const state = {
     map: M.id,
     turn: 1,
     nextId: 1,
+    seed: seed >>> 0,
     regions: {},
     units: [],
     players: {},
@@ -773,12 +789,34 @@ export function resolveTurn(prevState, orders) {
     if (!attackers.length) continue;
     const defended = unitsIn(state, r.id, (u) => u.owner === defSide && (u.type === 'bot' || u.type === 'swarm')).length > 0;
     if (defended) continue;
+    // Taking ground is never free: even an undefended region bleeds the
+    // attacking force — one strength always, sometimes a second when the
+    // local resistance gets lucky. The weakest group pays first.
+    let toll = RULES.combat.captureToll
+      + (luckRoll(state, r.id, RULES.combat.captureTollLuck) ? 1 : 0);
+    const tollPaid = toll;
+    const tollDead = new Set();
+    for (const u of [...attackers].sort((x, y) => x.strength - y.strength)) {
+      if (toll <= 0) break;
+      const hit = Math.min(u.strength, toll);
+      u.strength -= hit;
+      toll -= hit;
+      if (u.strength <= 0) tollDead.add(u.id);
+    }
+    removeUnits(tollDead);
+    const survivors = attackers.filter((u) => u.strength > 0);
+    const tollNote = ` Resistance cost your swarms ${tollPaid} strength.`;
+    if (!survivors.length) {
+      log(atkSide, 3, `Your assault burned out at ${r.name}`, `The last of your swarms was lost overrunning the region — it holds.${tollNote}`, '#d8624f');
+      log(defSide, 3, `An assault fizzled at ${r.name}`, 'The attacking swarms burned out before they could take the region.', '#d8624f');
+      continue;
+    }
     const cap = region.nodes.find((n) => n.type === 'CAP' && n.hp > 0);
     if (cap) {
-      const dmg = attackers.reduce((s, u) => s + u.strength, 0);
+      const dmg = survivors.reduce((s, u) => s + u.strength, 0);
       cap.hp -= dmg;
       log(defSide, 3, `Your capital is under siege at ${r.name}`, `Command centre took ${dmg} damage — ${Math.max(0, cap.hp)} remaining.`, '#d8624f');
-      log(atkSide, 3, `Sieging their capital at ${r.name}`, `Dealt ${dmg} damage — ${Math.max(0, cap.hp)} remaining.`, '#d8624f');
+      log(atkSide, 3, `Sieging their capital at ${r.name}`, `Dealt ${dmg} damage — ${Math.max(0, cap.hp)} remaining.${tollNote}`, '#d8624f');
     } else {
       region.owner = atkSide;
       region.isolated = false;
@@ -788,7 +826,7 @@ export function resolveTurn(prevState, orders) {
       region.nodes = [];
       const defP = state.players[defSide];
       defP.builds = defP.builds.filter((b) => b.region !== r.id && b.facility !== r.id);
-      log(atkSide, 3, `You took ${r.name}`, smashed ? `Their structures there were destroyed (${smashed}).` : 'The region is yours.', '#d8624f');
+      log(atkSide, 3, `You took ${r.name}`, `${smashed ? `Their structures there were destroyed (${smashed}).` : 'The region is yours.'}${tollNote}`, '#d8624f');
       log(defSide, 3, `You lost ${r.name}`, smashed ? `Everything built there was destroyed (${smashed}).` : 'Enemy swarms overran it.', '#d8624f');
     }
   }
