@@ -304,6 +304,62 @@ test('economy breakdown matches the resolved net income', () => {
   });
 });
 
+test('units route around cut-off regions instead of jamming', () => {
+  let state = createMatch();
+  // Force a swarm whose straight-line route would pass through marnow, then
+  // seal marnow off. It must route around, not jam at the border.
+  state.regions.marnow.owner = 'A';
+  state.regions.marnow.isolated = true;
+  state.units.push({ id: state.nextId++, owner: 'A', type: 'swarm', region: 'lowmarch', target: 'norvane', path: ['marnow', 'norvane'], strength: 6 });
+  const id = state.nextId - 1;
+  ({ state } = turn(state));
+  const u = state.units.find((x) => x.id === id);
+  assert.notEqual(u.region, 'lowmarch', 'moved instead of jamming');
+  assert.ok(u.region !== 'marnow', 'did not enter the sealed region');
+  // A couple more turns and it arrives via the detour.
+  state = skipTurns(state, 3);
+  const arrived = state.units.find((x) => x.id === id);
+  assert.equal(arrived.region, 'norvane');
+});
+
+test('worms still bounce off a quarantined TARGET (no sneaky reroute)', () => {
+  let state = createMatch();
+  state.regions.ellwick.isolated = true;
+  state.units.push({ id: state.nextId++, owner: 'B', type: 'worm', region: 'lowmarch', target: 'ellwick', path: ['ellwick'], detectedBy: {} });
+  const id = state.nextId - 1;
+  ({ state } = turn(state));
+  const u = state.units.find((x) => x.id === id);
+  assert.equal(u.region, 'lowmarch', 'held at the border — isolation still works');
+});
+
+test('defenders travel any distance through your own network', () => {
+  let state = createMatch();
+  // aldermoor → vellmar is 2 hops through A territory (BFS goes via brackwell).
+  ({ state } = turn(state, [{ kind: 'move_bots', from: 'aldermoor', to: 'vellmar', count: 2 }]));
+  assert.equal(botsIn(state, 'aldermoor', 'A').length, 2, '2 of 4 left the capital');
+  assert.equal(botsIn(state, 'vellmar', 'A').length, 1, 'not there yet after 1 turn');
+  ({ state } = turn(state));
+  assert.equal(botsIn(state, 'vellmar', 'A').length, 3, 'arrived: 2 moved + 1 stationed');
+  // A route that leaves your network is rejected.
+  const bad = validateOrders(state, 'A', [{ kind: 'move_bots', from: 'aldermoor', to: 'ostrey', count: 1 }]);
+  assert.equal(bad.accepted.length, 0, 'cannot send defenders into enemy land');
+});
+
+test('repair restores a damaged structure for §1 per 2 HP (never the capital)', () => {
+  let state = createMatch();
+  const fin = state.regions.ellwick.nodes.find((n) => n.type === 'FIN');
+  fin.hp = 40;
+  const cost = Math.ceil((RULES.combat.nodeHp - 40) * RULES.repairPerHp);
+  const before = state.players.A.funding;
+  ({ state } = turn(state, [{ kind: 'repair', region: 'ellwick', type: 'FIN' }]));
+  assert.equal(state.regions.ellwick.nodes.find((n) => n.type === 'FIN').hp, RULES.combat.nodeHp);
+  assert.equal(state.players.A.funding, before - cost + state.players.A.income);
+  const cap = validateOrders(state, 'A', [{ kind: 'repair', region: 'aldermoor', type: 'CAP' }]);
+  assert.equal(cap.accepted.length, 0, 'capitals cannot be repaired');
+  const fine = validateOrders(state, 'A', [{ kind: 'repair', region: 'ellwick', type: 'FIN' }]);
+  assert.equal(fine.accepted.length, 0, 'nothing damaged to repair');
+});
+
 test('determinism: same state + same orders → identical result', () => {
   const state = createMatch();
   const orders = {

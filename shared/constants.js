@@ -2,15 +2,15 @@
 // Used by the server engine, the headless tests, and the browser client
 // (served statically at /shared/constants.js).
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 export const NODE_META = {
   CAP: { label: 'Command centre', color: '#e8b53f', tint: '#fbf1d6' },
   FIN: { label: 'Finance hub', color: '#3f9c78', tint: '#dff2ea' },
   INF: { label: 'Defender garrison', color: '#4a7fe0', tint: '#e2ebfb' },
   ANL: { label: 'Analyst post', color: '#8f5fc7', tint: '#eee4f8' },
-  OPS: { label: 'Cyber ops', color: '#d8624f', tint: '#fae0da' },
-  LNC: { label: 'Launch facility', color: '#c48a1e', tint: '#f8eed6' },
+  OPS: { label: 'Red team den', color: '#d8624f', tint: '#fae0da' },
+  LNC: { label: 'Uplink station', color: '#c48a1e', tint: '#f8eed6' },
 };
 
 export const RULES = {
@@ -38,6 +38,7 @@ export const RULES = {
   },
   refundRate: 0.5,      // cancelling an in-progress build
   demolishRefund: 0.25, // decommissioning a finished structure
+  repairPerHp: 0.5,     // §1 per 2 HP restored (command centres can't be repaired)
   income: { capital: 20, finance: 25 },
   upkeep: { node: 2, bot: 2, swarm: 4, worm: 4, satellite: 6 },
   combat: {

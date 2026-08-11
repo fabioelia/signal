@@ -18,6 +18,9 @@
 import { NODE_META, RULES, RESOLUTION_STEPS, VERSION } from '../shared/constants.js';
 import { Match } from '../shared/match.js';
 import { shortestPath } from '../shared/map.js';
+import { aiOrders } from './ai.js';
+
+const SAVE_KEY = 'sd_local_save';
 
 const $app = document.getElementById('app');
 
@@ -147,17 +150,51 @@ function handleMessage(msg) {
 // cover hides the board between seats so nobody peeks.
 // --------------------------------------------------------------------------
 
-let local = null; // { match, seats: {A: {sync, pendingResolve}, B: {...}} }
+let local = null; // { match, ai, seats: {A: {sync, pendingResolve}, B: {...}} }
 
-function startLocal(nameA, nameB) {
-  local = { match: new Match('LOCAL', 'relaxed'), seats: { A: {}, B: {} } };
+function startLocal(nameA, nameB, { ai = false, restored = null } = {}) {
+  local = { match: new Match('LOCAL', 'relaxed'), ai, aiPending: false, seats: { A: {}, B: {} } };
   S.localSeat = 'A';
+  S.localHandoff = null;
   S.joined = { code: 'LOCAL', side: 'A', token: null };
+  Object.assign(S.ui, {
+    tab: 'map', selected: null, pending: [], pick: null, buildMenu: false,
+    reinforceMenu: false, decomMenu: false, attackMenu: null, resolve: null,
+    hideOver: false, sawMap: true, lockConfirm: false, autoLocked: false,
+  });
   const fakeWs = (side) => ({ readyState: 1, send: (json) => deliverLocal(side, JSON.parse(json)) });
   local.match.addPlayer(fakeWs('A'), nameA, 'seat-a');
   local.match.addPlayer(fakeWs('B'), nameB, 'seat-b');
-  local.match.setReady('A', true);
-  local.match.setReady('B', true); // both ready → the match starts immediately
+  if (restored) {
+    local.match.state = restored;
+    local.match.phase = restored.winner ? 'over' : 'planning';
+    if (restored.winner) local.match.syncAll();
+    else local.match.startPlanning();
+  } else {
+    local.match.setReady('A', true);
+    local.match.setReady('B', true); // both ready → the match starts immediately
+  }
+}
+
+function saveLocal() {
+  if (!local?.match?.state) return;
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      v: VERSION,
+      ai: local.ai,
+      names: { A: local.match.players.A.name, B: local.match.players.B.name },
+      state: local.match.state,
+    }));
+  } catch { /* private mode / storage full — the game still runs */ }
+}
+
+function loadLocalSave() {
+  try {
+    const save = JSON.parse(localStorage.getItem(SAVE_KEY));
+    return save?.state?.regions ? save : null;
+  } catch {
+    return null;
+  }
 }
 
 function deliverLocal(side, msg) {
@@ -166,6 +203,18 @@ function deliverLocal(side, msg) {
   seat.sync = msg;
   if (msg.resolved && msg.view) {
     seat.pendingResolve = { turn: msg.view.turn - 1, log: msg.log || [] };
+  }
+  saveLocal(); // hot-seat games survive reloads and can be exported
+  // The Daemon plays seat B: as soon as it sees a planning view, it locks in.
+  if (local.ai && side === 'B' && msg.match.phase === 'planning' && !msg.you.locked && !local.aiPending) {
+    local.aiPending = true;
+    setTimeout(() => {
+      local.aiPending = false;
+      const m = local?.match;
+      if (m && m.phase === 'planning' && !m.players.B.locked && local.seats.B.sync?.view) {
+        m.lockOrders('B', aiOrders(local.seats.B.sync.view));
+      }
+    }, 60);
   }
   if (side === S.localSeat && !S.localHandoff) applyLocalSync(side);
 }
@@ -195,8 +244,9 @@ function routeLocal(msg) {
   if (msg.t === 'lock') {
     m.lockOrders(S.localSeat, msg.orders);
     // If the turn didn't resolve (the other seat hasn't locked yet), it's
-    // their move — put up the handoff cover.
-    if (m.phase === 'planning' && m.players[S.localSeat].locked) {
+    // their move — put up the handoff cover. Never against the Daemon: it
+    // locks on its own within a moment.
+    if (!local.ai && m.phase === 'planning' && m.players[S.localSeat].locked) {
       S.localHandoff = S.localSeat === 'A' ? 'B' : 'A';
       render();
     }
@@ -266,6 +316,7 @@ function estCost(o) {
     case 'build_asat': return c.asat;
     case 'move_satellite': return c.moveSat;
     case 'sweep': return analystNear(o.region) ? c.sweep : c.sweepFar;
+    case 'repair': return o.estCost || 0;
     default: return 0;
   }
 }
@@ -323,8 +374,9 @@ function orderChip(o) {
     case 'isolate': return { label: `Cut off ${regionName(o.region)}`, meta: 'Reconnect takes 2 turns', color: '#e8b53f' };
     case 'reconnect': return { label: `Reconnect ${regionName(o.region)}`, meta: `${RULES.reconnectTurns} turns · vulnerable meanwhile`, color: '#e8b53f' };
     case 'sweep': return { label: `Sweep ${regionName(o.region)}`, meta: `1 turn · §${cost}`, color: '#8f5fc7' };
+    case 'repair': return { label: `Repair ${NODE_META[o.type].label.toLowerCase()} at ${regionName(o.region)}`, meta: `1 turn · §${o.estCost}`, color: '#3f9c78' };
     case 'build_swarm': return { label: `Swarm push on ${regionName(o.target)}`, meta: `from ${regionName(o.facility)} · ${t.swarm} turns to build · §${cost}`, color: '#d8624f' };
-    case 'build_worm': return { label: `Worm run at ${regionName(o.target)}`, meta: `from ${regionName(o.facility)} · ${t.worm} turns to build · §${cost}`, color: '#d8624f' };
+    case 'build_worm': return { label: `Worm run at ${regionName(o.target)}`, meta: `from ${regionName(o.facility)}${o.targetNode ? ` · aimed at the ${NODE_META[o.targetNode].label.toLowerCase()}` : ''} · ${t.worm} turns to build · §${cost}`, color: '#d8624f' };
     case 'build_satellite': return { label: `Satellite over ${regionName(o.target)}`, meta: `${t.satellite} turns · §${cost}`, color: '#c48a1e' };
     case 'build_asat': return { label: 'Build a satellite killer', meta: `${t.asat} turns · §${cost}`, color: '#d8624f' };
     case 'move_satellite': return { label: `Move satellite to ${regionName(o.target)}`, meta: `${t.moveSat} turns · §${cost}`, color: '#c48a1e' };
@@ -358,7 +410,7 @@ function addOrder(o) {
 
 function lockIn() {
   if (!planning() || locked()) return;
-  send({ t: 'lock', orders: S.ui.pending.map(({ maxCount, label, refund, unitType, ...o }) => o) });
+  send({ t: 'lock', orders: S.ui.pending.map(({ maxCount, label, refund, unitType, estCost, ...o }) => o) });
 }
 
 // --------------------------------------------------------------------------
@@ -432,8 +484,20 @@ function renderConnect() {
           <input id="name2-in" maxlength="24" placeholder="e.g. Kestrel">
         </div>
         <button class="paper-btn primary" data-act="local">Start pass-and-play</button>
+        <button class="paper-btn" data-act="local-ai">Play vs the Daemon (AI)</button>
         <div class="rule"></div>
-        <div class="body">Two players, one screen. You hand the device back and forth; a cover screen keeps each side's fog private. Runs entirely in this page.</div>
+        ${(() => {
+    const save = loadLocalSave();
+    return save ? `
+        <button class="paper-btn primary" data-act="resume-save">Resume saved game — turn ${save.state.turn}${save.ai ? ' vs the Daemon' : ''}</button>
+        <div style="display:flex;gap:8px">
+          <button class="paper-btn" style="flex:1" data-act="export-save">Export save</button>
+          <button class="paper-btn" style="flex:1" data-act="import-save">Import save</button>
+        </div>` : `
+        <button class="paper-btn" data-act="import-save">Import a save file</button>`;
+  })()}
+        <input type="file" id="import-in" accept=".json,application/json" style="display:none">
+        <div class="body">Runs entirely in this page and auto-saves every turn — reload and resume any time. Pass-and-play hides each side's fog behind a cover screen.</div>
       </div>
     </div>
   </div>`;
@@ -607,10 +671,19 @@ function unitBadges(v, id) {
   const enSw = here.filter((u) => u.type === 'swarm' && u.owner !== mine).reduce((s, u) => s + (u.strength || 0), 0);
   const myWorms = here.filter((u) => u.type === 'worm' && u.owner === mine).length;
   const enWorms = here.filter((u) => u.type === 'worm' && u.owner !== mine).length;
-  if (mySw) parts.push(`<span class="ubadge" style="color:#9dc1f7">▲${mySw}</span>`);
-  if (enSw) parts.push(`<span class="ubadge" style="color:#f0a58f">▲${enSw}</span>`);
-  if (myWorms) parts.push(`<span class="ubadge" style="color:#c9a8ef">◆${myWorms}</span>`);
-  if (enWorms) parts.push(`<span class="ubadge" style="color:#e8a0d2">◆!</span>`);
+  if (mySw) parts.push(`<span class="ubadge" style="color:#9dc1f7" title="your swarm, strength ${mySw}">▲${mySw}</span>`);
+  if (enSw) parts.push(`<span class="ubadge" style="color:#f0a58f" title="enemy swarm, strength ${enSw}">▲${enSw}</span>`);
+  if (myWorms) parts.push(`<span class="ubadge" style="color:#c9a8ef" title="your worm${myWorms === 1 ? '' : 's'}">◆${myWorms}</span>`);
+  if (enWorms) parts.push(`<span class="ubadge" style="color:#e8a0d2" title="detected enemy worm — defenders here can intercept it">◆!</span>`);
+  // Your in-progress work on this tile, so you don't have to click around:
+  // claims/structures/training/repairs at the region, swarm/worm/satellite
+  // builds at their facility.
+  const builds = v.you.builds.filter((b) => (b.facility || b.region) === id);
+  if (builds.length) {
+    const min = Math.min(...builds.map((b) => b.turnsLeft));
+    const what = builds.map((b) => `${buildLabel(b)} — ${b.turnsLeft} turn${b.turnsLeft === 1 ? '' : 's'} left`).join('\n');
+    parts.push(`<span class="ubadge" style="color:#9fd1b6" title="${esc(what)}">⚒${builds.length > 1 ? builds.length : ''}·${min}</span>`);
+  }
   return parts.length ? `<div class="unitrow">${parts.join('')}</div>` : '';
 }
 
@@ -853,7 +926,7 @@ function renderOrbit(v) {
       <div class="pane-title">Orbital layer</div>
       <div class="pane-sub">Satellites watch a patch of the map and spot stealthy worms passing through it. Everyone can see you launching one.</div>
     </div>
-    <div class="grid2">${cards.join('') || '<div class="pane-sub">Nothing in orbit yet. Build a satellite from an enemy or neutral region\'s panel — you\'ll need a launch facility.</div>'}</div>
+    <div class="grid2">${cards.join('') || '<div class="pane-sub">Nothing in orbit yet. Build a satellite from an enemy or neutral region\'s panel — you\'ll need an uplink station.</div>'}</div>
   </div>`;
 }
 
@@ -947,15 +1020,28 @@ function renderSidebar(v) {
   }
 
   const nodes = (r.nodes || r.intel?.nodes || []);
+  const pendingRepairs = (type) =>
+    S.ui.pending.filter((o) => o.kind === 'repair' && o.region === id && o.type === type).length
+    + v.you.builds.filter((b) => b.kind === 'repair' && b.region === id && b.type === type).length;
+  const repairShown = {};
   const nodeRows = nodes.length ? nodes.map((n) => {
     const meta = NODE_META[n.type];
     const pct = n.hpPct ?? Math.round((n.hp / n.maxHp) * 100);
     const hpText = (mine || live) ? `${pct}% healthy` : r.intel ? `${pct}% when seen` : 'unknown';
+    let repairBtn = '';
+    if (mine && n.type !== 'CAP' && n.hp < n.maxHp && planning() && !locked()) {
+      repairShown[n.type] = (repairShown[n.type] || 0) + 1;
+      const damagedOfType = nodes.filter((x) => x.type === n.type && x.hp < x.maxHp).length;
+      if (pendingRepairs(n.type) < damagedOfType && repairShown[n.type] <= damagedOfType - pendingRepairs(n.type)) {
+        const cost = Math.max(5, Math.ceil((n.maxHp - n.hp) * RULES.repairPerHp));
+        repairBtn = `<button class="paper-btn" style="padding:2px 9px;font-size:12px;margin-left:8px" data-act="repair" data-arg="${n.type}" data-cost="${cost}" ${budgetLeft() < cost ? 'disabled' : ''}>Repair §${cost}</button>`;
+      }
+    }
     return `
-    <div class="node-row">
+    <div class="node-row" title="${esc(nodeEffect(n.type))}">
       <div class="icon" style="background:${meta.tint}"><i style="background:${meta.color}"></i></div>
       <div class="meta">
-        <div class="top"><span class="label">${meta.label}</span><span class="hp-text">${hpText}</span></div>
+        <div class="top"><span class="label">${meta.label}</span><span class="hp-text">${hpText}${repairBtn}</span></div>
         <div class="track"><div class="fill" style="background:${meta.color};width:${pct}%"></div></div>
       </div>
     </div>`;
@@ -1023,6 +1109,7 @@ function renderSidebar(v) {
         ${nodeRows}
         <div class="kv"><span>Defenders stationed</span><b>${garrison}</b></div>
         ${(mine || live) ? `<div class="kv"><span>Structure slots</span><b>${nodes.length}/${RULES.maxNodesPerRegion}</b></div>` : ''}
+        ${mine ? facilityStatusRows(v, id, r) : ''}
         ${unitRows}
       </div>
       ${starvedWarn}
@@ -1034,6 +1121,34 @@ function renderSidebar(v) {
       </div>
     </div>
   </div>`;
+}
+
+// "Is my red team den / uplink station here free or busy?" — playtesters
+// couldn't tell why they couldn't send more swarms.
+function facilityStatusRows(v, id, r) {
+  return ['OPS', 'LNC'].map((type) => {
+    const count = (r.nodes || []).filter((n) => n.type === type).length;
+    if (!count) return '';
+    const kinds = type === 'OPS' ? ['swarm', 'worm'] : ['satellite', 'asat'];
+    const orderKinds = type === 'OPS' ? ['build_swarm', 'build_worm'] : ['build_satellite', 'build_asat'];
+    const busy = v.you.builds.filter((b) => (b.facility || b.region) === id && kinds.includes(b.kind));
+    const queued = S.ui.pending.filter((o) => orderKinds.includes(o.kind) && o.facility === id).length;
+    const used = busy.length + queued;
+    const status = used >= count
+      ? (busy[0] ? `busy — ${buildLabel(busy[0])}, ${busy[0].turnsLeft} left` : 'busy — queued this turn')
+      : 'idle — ready to build';
+    return `<div class="kv"><span>${NODE_META[type].label}</span><b style="color:${used >= count ? '#a07a24' : '#3f9c78'};font-weight:500">${status}</b></div>`;
+  }).join('');
+}
+
+// Travel time for defenders: through your own connected network only.
+function botEta(from, to) {
+  const blocked = (rid) => {
+    const rr = region(rid);
+    return !rr || rr.owner !== mySide() || rr.isolated || rr.reconnecting > 0;
+  };
+  const path = shortestPath(from, to, blocked);
+  return path ? path.length : null;
 }
 
 function buildLabel(b) {
@@ -1085,20 +1200,23 @@ function renderActions(v, r) {
 
   if (mine) {
     const cutOff = r.isolated;
-    const sources = r.neighbors
-      .map((n) => region(n))
-      .filter((n) => isMine(n) && (n.garrison ?? 0) > 0 && !n.isolated);
+    const sources = Object.values(view().regions)
+      .filter((n) => isMine(n) && n.id !== id && (n.garrison ?? 0) > 0 && !n.isolated)
+      .map((n) => ({ ...n, eta: botEta(n.id, id) }))
+      .filter((n) => n.eta !== null && n.eta > 0)
+      .sort((a, b) => a.eta - b.eta)
+      .slice(0, 6);
     out.push(actionBtn({
-      act: 'reinforce-menu', label: 'Send defenders here', detail: 'Pull bots from a neighbouring region',
-      cost: '§0', time: '1 turn', color: '#4a7fe0',
+      act: 'reinforce-menu', label: 'Send defenders here', detail: 'Pull bots from anywhere in your network — they travel one region per turn',
+      cost: '§0', time: '1+ turns', color: '#4a7fe0',
       disabled: cutOff || r.reconnecting > 0 || !sources.length,
-      why: cutOff || r.reconnecting > 0 ? 'This region cannot receive units right now' : !sources.length ? 'No neighbouring defenders available' : '',
+      why: cutOff || r.reconnecting > 0 ? 'This region cannot receive units right now' : !sources.length ? 'No reachable defenders available' : '',
     }));
     if (S.ui.reinforceMenu && sources.length && !cutOff && r.reconnecting === 0) {
       out.push(`<div class="sub-actions">${sources.map((n) => {
         const pendingFrom = S.ui.pending.filter((o) => o.kind === 'move_bots' && o.from === n.id).reduce((s, o) => s + o.count, 0);
         const avail = (n.garrison ?? 0) - pendingFrom;
-        return `<button class="paper-btn" data-act="reinforce" data-arg="${n.id}" ${avail < 1 ? 'disabled' : ''}>+1 from ${esc(n.name)} (${avail} available)</button>`;
+        return `<button class="paper-btn" data-act="reinforce" data-arg="${n.id}" ${avail < 1 ? 'disabled' : ''}>+1 from ${esc(n.name)} (${avail} available) · ${n.eta} turn${n.eta === 1 ? '' : 's'}</button>`;
       }).join('')}</div>`);
     }
     if ((r.nodes || []).some((n) => n.type === 'INF')) {
@@ -1123,7 +1241,7 @@ function renderActions(v, r) {
       cost: `§${sweepCost}`, time: '1 turn', color: '#8f5fc7', disabled: left < sweepCost,
     }));
     out.push(actionBtn({
-      act: 'build-menu', label: 'Build something new', detail: 'Add a finance hub, garrison, analyst post, ops centre or launch facility',
+      act: 'build-menu', label: 'Build something new', detail: 'Add a finance hub, garrison, analyst post, red team den or uplink station',
       cost: `from §${c.node.INF}`, time: '2–4 turns', color: '#3f9c78',
       disabled: cutOff || r.reconnecting > 0 || (r.nodes || []).length >= RULES.maxNodesPerRegion,
       why: (r.nodes || []).length >= RULES.maxNodesPerRegion ? 'Region is full' : '',
@@ -1169,16 +1287,27 @@ function renderActions(v, r) {
     }
     const opsChoices = idleOpsRegions();
     const opsWhy = opsChoices.length === 0
-      ? (facilityFree('OPS') ? '' : 'Every cyber ops centre is busy — build another, or wait')
+      ? (facilityFree('OPS') ? '' : 'Every red team den is busy — build another, or wait')
       : '';
-    const attackSub = (kind) => `<div class="sub-actions">${opsChoices.map((ops) => {
-      const dist = travelEta(ops, id);
-      const buildT = kind === 'swarm' ? t.swarm : t.worm;
-      return `
+    const knownTypes = [...new Set((r.nodes || r.intel?.nodes || []).map((n) => n.type))];
+    const attackSub = (kind) => {
+      const aim = kind === 'worm' && knownTypes.length ? `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <span style="font-size:13px;color:var(--paper-muted)">Aim at:</span>
+        ${['auto', ...knownTypes].map((type) => {
+    const on = (S.ui.wormAim || 'auto') === type;
+    return `<button class="paper-btn" style="padding:4px 10px;font-size:12px;${on ? 'background:#4a7fe0;border-color:#4a7fe0;color:#fff' : ''}" data-act="worm-aim" data-arg="${type}">${type === 'auto' ? 'first target' : NODE_META[type].label}</button>`;
+  }).join('')}
+      </div>` : '';
+      return `<div class="sub-actions">${aim}${opsChoices.map((ops) => {
+        const dist = travelEta(ops, id);
+        const buildT = kind === 'swarm' ? t.swarm : t.worm;
+        return `
       <button class="paper-btn" style="text-align:left" data-act="attack-from" data-arg="${ops}">
         <b>From ${esc(regionName(ops))}</b> · ${buildT} turns to build, then ${dist} turn${dist === 1 ? '' : 's'} of travel
       </button>`;
-    }).join('')}</div>`;
+      }).join('')}</div>`;
+    };
     out.push(actionBtn({
       act: 'swarm', label: 'Send a swarm here', detail: 'Cheap and numerous. Travels one region per turn and can be seen coming',
       cost: `§${c.swarm}`, time: `${t.swarm} turns to build`, color: '#d8624f',
@@ -1193,13 +1322,13 @@ function renderActions(v, r) {
         disabled: !opsChoices.length || left < c.worm,
         why: opsWhy || (opsChoices.length && left < c.worm ? 'Not enough funding left' : opsWhy),
       }));
-      if (S.ui.attackMenu === 'worm' && opsChoices.length > 1) out.push(attackSub('worm'));
+      if (S.ui.attackMenu === 'worm' && (opsChoices.length > 1 || knownTypes.length)) out.push(attackSub('worm'));
     }
     out.push(actionBtn({
       act: 'satellite', label: 'Put a satellite overhead', detail: enemy ? 'See what is really in here, and spot worms passing through' : 'Watch the crossroads before they use it',
       cost: `§${c.satellite}`, time: `${t.satellite} turns`, color: '#c48a1e',
       disabled: !facilityFree('LNC') || left < c.satellite,
-      why: !facilityFree('LNC') ? 'Every launch facility is busy (or you have none)' : '',
+      why: !facilityFree('LNC') ? 'Every uplink station is busy (or you have none)' : '',
     }));
   }
   return out.join('');
@@ -1319,14 +1448,40 @@ $app.addEventListener('click', (ev) => {
       send({ t: 'quick', name });
       break;
     }
-    case 'local': {
+    case 'local':
+    case 'local-ai': {
       const p1 = (document.getElementById('name-in')?.value || S.name || '').trim() || 'Player 1';
-      const p2 = (document.getElementById('name2-in')?.value || '').trim() || 'Player 2';
+      const ai = act === 'local-ai';
+      const p2 = ai ? 'The Daemon' : (document.getElementById('name2-in')?.value || '').trim() || 'Player 2';
       S.name = p1;
       localStorage.setItem('sd_name', p1);
-      startLocal(p1, p2);
+      startLocal(p1, p2, { ai });
       break;
     }
+    case 'resume-save': {
+      const save = loadLocalSave();
+      if (!save) break;
+      try {
+        startLocal(save.names.A, save.names.B, { ai: save.ai, restored: save.state });
+      } catch (e) {
+        localStorage.removeItem(SAVE_KEY);
+        S.err = 'That save could not be loaded (probably from an older version).';
+        local = null;
+        render();
+      }
+      break;
+    }
+    case 'export-save': {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) break;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([raw], { type: 'application/json' }));
+      a.download = `signal-dominion-turn${loadLocalSave()?.state.turn ?? 0}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      break;
+    }
+    case 'import-save': document.getElementById('import-in')?.click(); break;
     case 'take-seat': takeSeat(S.localHandoff); break;
     case 'ready': send({ t: 'ready', ready: !S.sync.you.ready }); break;
     case 'leave':
@@ -1385,6 +1540,7 @@ $app.addEventListener('click', (ev) => {
     case 'build-node': addOrder({ kind: 'build_node', region: sel(), type: arg }); break;
     case 'decom-menu': S.ui.decomMenu = !S.ui.decomMenu; S.ui.buildMenu = false; render(); break;
     case 'demolish': addOrder({ kind: 'demolish', region: sel(), type: arg }); break;
+    case 'repair': addOrder({ kind: 'repair', region: sel(), type: arg, estCost: Number(el.dataset.cost) || 0 }); break;
     case 'disband-bot': addOrder({ kind: 'disband_bots', region: sel(), count: 1 }); break;
     case 'disband': {
       const u = view().units.find((x) => x.id === Number(arg));
@@ -1404,13 +1560,18 @@ $app.addEventListener('click', (ev) => {
       const kind = act === 'swarm' ? 'build_swarm' : 'build_worm';
       const ops = idleOpsRegions();
       if (!ops.length) break;
-      if (ops.length === 1) addOrder({ kind, target: sel(), facility: ops[0] });
-      else { S.ui.attackMenu = S.ui.attackMenu === act ? null : act; render(); }
+      const r = region(sel());
+      const aimable = act === 'worm' && (r?.nodes || r?.intel?.nodes || []).length > 0;
+      if (ops.length === 1 && !aimable) addOrder({ kind, target: sel(), facility: ops[0] });
+      else { S.ui.attackMenu = S.ui.attackMenu === act ? null : act; S.ui.wormAim = null; render(); }
       break;
     }
+    case 'worm-aim': S.ui.wormAim = arg; render(); break;
     case 'attack-from': {
       const kind = S.ui.attackMenu === 'worm' ? 'build_worm' : 'build_swarm';
-      addOrder({ kind, target: sel(), facility: arg });
+      const o = { kind, target: sel(), facility: arg };
+      if (kind === 'build_worm' && S.ui.wormAim && S.ui.wormAim !== 'auto') o.targetNode = S.ui.wormAim;
+      addOrder(o);
       break;
     }
     case 'satellite': addOrder({ kind: 'build_satellite', target: sel() }); break;
@@ -1449,6 +1610,23 @@ $app.addEventListener('input', (ev) => {
   }
 });
 
+$app.addEventListener('change', (ev) => {
+  if (ev.target.id !== 'import-in' || !ev.target.files?.[0]) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const save = JSON.parse(reader.result);
+      if (!save?.state?.regions) throw new Error('not a save');
+      localStorage.setItem(SAVE_KEY, JSON.stringify(save));
+      startLocal(save.names?.A || 'Player 1', save.names?.B || 'Player 2', { ai: !!save.ai, restored: save.state });
+    } catch {
+      S.err = 'That file is not a SIGNAL DOMINION save.';
+      render();
+    }
+  };
+  reader.readAsText(ev.target.files[0]);
+});
+
 function readName() {
   const el = document.getElementById('name-in');
   const name = (el?.value || S.name || '').trim();
@@ -1470,10 +1648,12 @@ function fitMap() {
   const scaleEl = document.getElementById('mapscale');
   if (!scaleEl) return;
   const wrap = scaleEl.parentElement;
-  const availW = wrap.clientWidth - 50;
-  const availH = wrap.clientHeight - 110;
-  const scale = Math.min(1, availW / 880, availH / 545);
-  scaleEl.style.transform = `scale(${scale})`;
+  const availW = wrap.clientWidth - 40;
+  const availH = wrap.clientHeight - 100; // leave room for the legend row
+  const scale = Math.min(1.6, availW / 880, availH / 545); // fill the space, don't just shrink
+  const x = Math.max(20, (wrap.clientWidth - 880 * scale) / 2);
+  const y = Math.max(16, (wrap.clientHeight - 90 - 545 * scale) / 2);
+  scaleEl.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
 }
 
 function afterRender() {

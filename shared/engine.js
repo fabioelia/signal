@@ -218,6 +218,26 @@ function entryBlocked(state, unitOwner, regionId) {
   return false;
 }
 
+// Can this unit stand in / pass through this region? Bots never leave their
+// owner's connected network; swarms and worms go anywhere that isn't sealed.
+function unitBlocked(state, u, regionId) {
+  const r = state.regions[regionId];
+  if (u.type === 'bot') return r.owner !== u.owner || r.isolated || r.reconnecting > 0;
+  return entryBlocked(state, u.owner, regionId);
+}
+
+// Route toward a target avoiding regions the unit cannot enter. The target
+// itself is never treated as blocked for swarms/worms — a worm heading for a
+// quarantined region still walks up to the border and bounces there, which
+// is the designed cost of isolation.
+function routeFor(state, u, target) {
+  const blocked = (id) => {
+    if (id === target && u.type !== 'bot') return false;
+    return unitBlocked(state, u, id);
+  };
+  return shortestPath(u.region, target, blocked);
+}
+
 function facilityLoad(state, side, kind) {
   // How many in-progress builds occupy each facility region.
   const wantsOps = kind === 'OPS';
@@ -301,14 +321,30 @@ export function validateOrders(state, side, orders) {
         const from = state.regions[o.from];
         const to = state.regions[o.to];
         if (!from || !to || from.owner !== side || to.owner !== side) { reject(o, 'both regions must be yours'); continue; }
-        if (!adjacent(o.from, o.to)) { reject(o, 'regions are not linked'); continue; }
         if (from.isolated) { reject(o, 'nothing gets out of a cut-off region'); continue; }
         if (to.isolated || to.reconnecting > 0) { reject(o, 'that region cannot receive units yet'); continue; }
+        const path = routeFor(state, { owner: side, type: 'bot', region: o.from }, o.to);
+        if (!path || !path.length) { reject(o, 'no open route through your network'); continue; }
         const avail = botsIn(state, o.from, side).length - (movesFrom[o.from] || 0);
         o.count = Math.max(1, Math.min(o.count || 1, avail));
         if (avail < 1) { reject(o, 'no defenders available there'); continue; }
         movesFrom[o.from] = (movesFrom[o.from] || 0) + o.count;
         o.cost = 0;
+        break;
+      }
+      case 'repair': {
+        if (!region || region.owner !== side) { reject(o, 'not your region'); continue; }
+        if (region.isolated || region.reconnecting > 0) { reject(o, 'region is cut off'); continue; }
+        if (o.type === 'CAP') { reject(o, 'command centres cannot be repaired — protect them'); continue; }
+        const damaged = region.nodes.filter((n) => n.type === o.type && n.hp > 0 && n.hp < RULES.combat.nodeHp).length;
+        const already = accepted.filter((a) => a.kind === 'repair' && a.region === o.region && a.type === o.type).length
+          + player.builds.filter((b) => b.kind === 'repair' && b.region === o.region && b.type === o.type).length;
+        if (already >= damaged) { reject(o, 'nothing damaged to repair'); continue; }
+        const node = region.nodes
+          .filter((n) => n.type === o.type && n.hp > 0 && n.hp < RULES.combat.nodeHp)
+          .sort((a, b) => a.hp - b.hp)[already];
+        const cost = Math.max(5, Math.ceil((RULES.combat.nodeHp - node.hp) * RULES.repairPerHp));
+        if (!costOf(cost)) { reject(o, 'not enough funding'); continue; }
         break;
       }
       case 'claim': {
@@ -358,13 +394,13 @@ export function validateOrders(state, side, orders) {
           const fr = state.regions[o.facility];
           const capacity = fr && fr.owner === side ? nodesOf(fr, 'OPS').length : 0;
           const used = (facilityLoad(state, side, 'OPS')[o.facility] || 0) + (extraOps[o.facility] || 0);
-          if (!capacity) { reject(o, 'no cyber ops centre there'); continue; }
-          if (used >= capacity) { reject(o, 'that ops centre is already busy'); continue; }
+          if (!capacity) { reject(o, 'no red team den there'); continue; }
+          if (used >= capacity) { reject(o, 'that red team den is already busy'); continue; }
           facility = o.facility;
         } else {
           facility = pickFacility(state, side, 'OPS', o.target, extraOps);
         }
-        if (!facility) { reject(o, 'every cyber ops centre is busy (or you have none)'); continue; }
+        if (!facility) { reject(o, 'every red team den is busy (or you have none)'); continue; }
         if (o.route) {
           let prev = facility;
           const ok = Array.isArray(o.route) && o.route.length &&
@@ -381,7 +417,7 @@ export function validateOrders(state, side, orders) {
       case 'build_satellite': {
         if (!o.target || !state.regions[o.target]) { reject(o, 'pick a region to watch'); continue; }
         const facility = pickFacility(state, side, 'LNC', null, extraLnc);
-        if (!facility) { reject(o, 'every launch facility is busy (or you have none)'); continue; }
+        if (!facility) { reject(o, 'every uplink station is busy (or you have none)'); continue; }
         if (!costOf(RULES.costs.satellite)) { reject(o, 'not enough funding'); continue; }
         o.facility = facility;
         extraLnc[facility] = (extraLnc[facility] || 0) + 1;
@@ -391,7 +427,7 @@ export function validateOrders(state, side, orders) {
         const sat = state.players[enemyOf(side)].satellites.find((s) => s.id === o.targetSat);
         if (!sat) { reject(o, 'that satellite is not up there'); continue; }
         const facility = pickFacility(state, side, 'LNC', null, extraLnc);
-        if (!facility) { reject(o, 'every launch facility is busy (or you have none)'); continue; }
+        if (!facility) { reject(o, 'every uplink station is busy (or you have none)'); continue; }
         if (!costOf(RULES.costs.asat)) { reject(o, 'not enough funding'); continue; }
         o.facility = facility;
         extraLnc[facility] = (extraLnc[facility] || 0) + 1;
@@ -496,6 +532,9 @@ export function resolveTurn(prevState, orders) {
         case 'train_bots':
           player.builds.push({ id: state.nextId++, kind: 'bots', count: o.count, region: o.region, cost: o.cost, turnsLeft: RULES.turns.bot, totalTurns: RULES.turns.bot });
           break;
+        case 'repair':
+          player.builds.push({ id: state.nextId++, kind: 'repair', type: o.type, region: o.region, cost: o.cost, turnsLeft: 1, totalTurns: 1 });
+          break;
         case 'build_swarm':
           player.builds.push({ id: state.nextId++, kind: 'swarm', facility: o.facility, region: o.facility, target: o.target, route: o.route || null, cost: o.cost, turnsLeft: RULES.turns.swarm, totalTurns: RULES.turns.swarm });
           break;
@@ -594,29 +633,48 @@ export function resolveTurn(prevState, orders) {
     const u = state.units.find((x) => x.id === o.unit && x.owner === side && (x.type === 'swarm' || x.type === 'worm'));
     if (!u) continue;
     u.target = o.target;
-    u.path = u.region === o.target ? [] : shortestPath(u.region, o.target) || [];
+    u.path = u.region === o.target ? [] : routeFor(state, u, o.target) || shortestPath(u.region, o.target) || [];
     log(side, 2, `Your ${u.type} has new orders`, `Now heading for ${regionName(o.target)} — ${u.path.length} turn${u.path.length === 1 ? '' : 's'} of travel.`, '#4a7fe0');
   }
   for (const [side, o] of botMoves) {
     const from = state.regions[o.from];
     const to = state.regions[o.to];
-    if (!from || !to || from.owner !== side || to.owner !== side || !adjacent(o.from, o.to)) continue;
-    if (from.isolated || entryBlocked(state, side, o.to)) {
-      log(side, 2, `Defenders held at ${regionName(o.from)}`, `${regionName(o.to)} cannot be entered right now.`, '#4a7fe0');
+    if (!from || !to || from.owner !== side || to.owner !== side) continue;
+    if (from.isolated) {
+      log(side, 2, `Defenders held at ${regionName(o.from)}`, 'Nothing gets out of a cut-off region.', '#4a7fe0');
       continue;
     }
-    const bots = botsIn(state, o.from, side).slice(0, o.count);
-    for (const b of bots) b.region = o.to;
+    const path = routeFor(state, { owner: side, type: 'bot', region: o.from }, o.to);
+    if (!path || !path.length) {
+      log(side, 2, `Defenders held at ${regionName(o.from)}`, `No open route to ${regionName(o.to)} through your network.`, '#4a7fe0');
+      continue;
+    }
+    // Prefer idle bots over ones already in transit.
+    const bots = botsIn(state, o.from, side)
+      .sort((a, b) => (a.path?.length ? 1 : 0) - (b.path?.length ? 1 : 0))
+      .slice(0, o.count);
+    for (const b of bots) {
+      b.path = [...path];
+      b.target = o.to;
+    }
     if (bots.length) {
-      log(side, 2, `${bots.length} defender${bots.length === 1 ? '' : 's'} moved to ${regionName(o.to)}`, `From ${regionName(o.from)}.`, '#4a7fe0');
+      log(side, 2, `${bots.length} defender${bots.length === 1 ? '' : 's'} heading to ${regionName(o.to)}`, `From ${regionName(o.from)} — ${path.length} turn${path.length === 1 ? '' : 's'} through your network.`, '#4a7fe0');
     }
   }
   for (const u of state.units) {
     if (!u.path || !u.path.length) continue;
-    const next = u.path[0];
-    if (entryBlocked(state, u.owner, next)) {
-      log(u.owner, 2, `Your ${u.type} is held near ${regionName(next)}`, 'The way in is cut off. It will resume when the region reopens.', '#4a7fe0');
-      continue;
+    let next = u.path[0];
+    if (unitBlocked(state, u, next)) {
+      // The way is sealed — try to route around it before giving up.
+      const dest = u.target || u.path[u.path.length - 1];
+      const alt = routeFor(state, u, dest);
+      if (alt && alt.length && !unitBlocked(state, u, alt[0])) {
+        u.path = alt;
+        next = alt[0];
+      } else {
+        log(u.owner, 2, `Your ${u.type} is held near ${regionName(next)}`, 'Every way forward is sealed off. It will move again when a route opens.', '#4a7fe0');
+        continue;
+      }
     }
     u.region = next;
     u.path.shift();
@@ -920,6 +978,23 @@ function completeBuild(state, side, b, log, regionName, name) {
       log(side, 5, `New ${b.type} online at ${regionName(b.region)}`, 'Finished building.', '#3f9c78');
       return;
     }
+    case 'repair': {
+      const region = state.regions[b.region];
+      if (region.owner !== side) {
+        log(side, 5, `Repair at ${regionName(b.region)} failed`, 'The region was lost.', '#3f9c78');
+        return;
+      }
+      const node = region.nodes
+        .filter((n) => n.type === b.type && n.hp > 0 && n.hp < RULES.combat.nodeHp)
+        .sort((a, x) => a.hp - x.hp)[0];
+      if (!node) {
+        log(side, 5, `Repair at ${regionName(b.region)} failed`, 'Nothing left to repair.', '#3f9c78');
+        return;
+      }
+      node.hp = RULES.combat.nodeHp;
+      log(side, 5, `${b.type} repaired at ${regionName(b.region)}`, 'Back to full strength.', '#3f9c78');
+      return;
+    }
     case 'bots': {
       const region = state.regions[b.region];
       if (region.owner !== side || !nodesOf(region, 'INF').length) {
@@ -936,10 +1011,13 @@ function completeBuild(state, side, b, log, regionName, name) {
     case 'worm': {
       const region = state.regions[b.facility];
       if (region.owner !== side || !nodesOf(region, 'OPS').length) {
-        log(side, 5, `${b.kind === 'swarm' ? 'Swarm' : 'Worm'} build lost`, `The ops centre at ${regionName(b.facility)} is gone.`, '#3f9c78');
+        log(side, 5, `${b.kind === 'swarm' ? 'Swarm' : 'Worm'} build lost`, `The red team den at ${regionName(b.facility)} is gone.`, '#3f9c78');
         return;
       }
-      const path = b.route ? [...b.route] : shortestPath(b.facility, b.target) || [];
+      const stub = { owner: side, type: b.kind, region: b.facility };
+      const path = b.route
+        ? [...b.route]
+        : routeFor(state, stub, b.target) || shortestPath(b.facility, b.target) || [];
       const unit = {
         id: state.nextId++,
         owner: side,
@@ -960,7 +1038,7 @@ function completeBuild(state, side, b, log, regionName, name) {
     case 'satellite': {
       const region = state.regions[b.facility];
       if (region.owner !== side || !nodesOf(region, 'LNC').length) {
-        log(side, 5, 'Satellite launch lost', `The launch facility at ${regionName(b.facility)} is gone.`, '#3f9c78');
+        log(side, 5, 'Satellite launch lost', `The uplink station at ${regionName(b.facility)} is gone.`, '#3f9c78');
         return;
       }
       const sat = { id: state.nextId++, owner: side, region: b.target };

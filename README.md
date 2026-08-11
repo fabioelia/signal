@@ -172,6 +172,24 @@ overlay, and used as `step` numbers in the report):
 
 ## Changelog
 
+**v0.3.0** — second playtest feedback round:
+- *Bug fix:* units now route **around** sealed-off regions instead of walking
+  into the quarantine border and jamming; if the map changes mid-journey they
+  re-route on their own. (A worm whose *target* is quarantined still bounces
+  at the border — that's the point of isolation.)
+- Defenders can be sent from **anywhere in your network**, travelling one
+  region per turn; the reinforce menu lists sources network-wide with ETAs.
+- **Repair** damaged structures (§1 per 2 HP, 1 turn) — capitals excluded.
+- **Play vs the Daemon**: a built-in AI opponent for single-player (fair: it
+  reads only its own fog-filtered view). Works on the static Pages build.
+- Local games **auto-save every turn** (localStorage) — reload and resume;
+  saves can be **exported/imported as JSON files**.
+- Map scales up to fill the screen; tiles show your in-progress builds (⚒)
+  without clicking; red team den / uplink station busy-or-idle status in the
+  region panel; worm strikes can be **aimed at a specific structure**.
+- Naming pass: Cyber ops → **Red team den**, Launch facility →
+  **Uplink station**.
+
 **v0.2.0** — first playtest feedback round: Funds tab (itemized income/
 upkeep, assets, builds, field units), decommission/disband/redirect orders,
 swarm origin choice, build-menu effect descriptions, "held — way in is cut

@@ -172,7 +172,7 @@ button:disabled { cursor: default; opacity: .45; }
 }
 
 .mapwrap { position: absolute; inset: 0; overflow: hidden; }
-.mapscale { position: absolute; left: 34px; top: 26px; width: 880px; height: 545px; transform-origin: 0 0; }
+.mapscale { position: absolute; left: 0; top: 0; width: 880px; height: 545px; transform-origin: 0 0; }
 .hex { position: absolute; width: 132px; height: 150px; clip-path: polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%); cursor: pointer; }
 .hex .inner {
   position: absolute; inset: 3px; clip-path: polygon(50% 0%,100% 25%,100% 75%,50% 100%,0% 75%,0% 25%);
