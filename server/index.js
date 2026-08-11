@@ -94,7 +94,7 @@ wss.on('connection', (ws) => {
 
     switch (msg.t) {
       case 'create': {
-        const match = new Match(newCode(), msg.pacing);
+        const match = new Match(newCode(), msg.pacing, msg.map);
         matches.set(match.code, match);
         joinSeat(ws, match, msg.name);
         break;

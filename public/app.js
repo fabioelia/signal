@@ -17,7 +17,7 @@
 // /signal/public/app.js so this resolves to /signal/shared/… — both correct.
 import { NODE_META, RULES, RESOLUTION_STEPS, VERSION } from '../shared/constants.js';
 import { Match } from '../shared/match.js';
-import { shortestPath } from '../shared/map.js';
+import { pathOn, MAPS, DEFAULT_MAP } from '../shared/map.js';
 import { aiOrders } from './ai.js';
 import { icon, logoMark, FAVICON } from './icons.js';
 import { ensureAudio, sfx, soundOn, toggleSound } from './audio.js';
@@ -160,8 +160,8 @@ function handleMessage(msg) {
 
 let local = null; // { match, ai, seats: {A: {sync, pendingResolve}, B: {...}} }
 
-function startLocal(nameA, nameB, { ai = false, restored = null } = {}) {
-  local = { match: new Match('LOCAL', 'relaxed'), ai, aiPending: false, seats: { A: {}, B: {} } };
+function startLocal(nameA, nameB, { ai = false, restored = null, map = undefined } = {}) {
+  local = { match: new Match('LOCAL', 'relaxed', restored?.map || map), ai, aiPending: false, seats: { A: {}, B: {} } };
   S.localSeat = 'A';
   S.localHandoff = null;
   S.joined = { code: 'LOCAL', side: 'A', token: null };
@@ -370,7 +370,7 @@ function idleOpsRegions() {
 }
 
 function travelEta(from, to) {
-  return (shortestPath(from, to) || []).length;
+  return (pathVia(from, to) || []).length;
 }
 
 function orderChip(o) {
@@ -395,6 +395,8 @@ function orderChip(o) {
     case 'disband': return { label: `Disband your ${o.unitType || 'unit'}`, meta: 'upkeep stops', color: '#8d99ab' };
     case 'disband_bots': return { label: `Disband ${o.count} defender${o.count === 1 ? '' : 's'} at ${regionName(o.region)}`, meta: 'upkeep stops', color: '#8d99ab' };
     case 'retarget': return { label: `Redirect ${o.unitType || 'unit'} to ${regionName(o.target)}`, meta: 'reroutes this turn', color: '#4a7fe0' };
+    case 'retarget_group': return { label: `Redirect ${o.units.length} swarm${o.units.length === 1 ? '' : 's'} → ${regionName(o.target)}`, meta: 'they reroute this turn', color: '#d8624f' };
+    case 'disband_group': return { label: `Disband ${o.units.length} swarm${o.units.length === 1 ? '' : 's'}`, meta: 'upkeep stops', color: '#8d99ab' };
     default: return { label: o.kind, meta: '', color: '#8d99ab' };
   }
 }
@@ -429,7 +431,14 @@ function resolveSounds(v, log) {
 
 function lockIn() {
   if (!planning() || locked()) return;
-  send({ t: 'lock', orders: S.ui.pending.map(({ maxCount, label, refund, unitType, estCost, standing, ...o }) => o) });
+  // Client-side group orders expand into the engine's per-unit orders here.
+  const orders = S.ui.pending.flatMap((o) => {
+    if (o.kind === 'retarget_group') return o.units.map((u) => ({ kind: 'retarget', unit: u, target: o.target }));
+    if (o.kind === 'disband_group') return o.units.map((u) => ({ kind: 'disband', unit: u }));
+    const { maxCount, label, refund, unitType, estCost, standing, ...rest } = o;
+    return [rest];
+  });
+  send({ t: 'lock', orders });
 }
 
 // Standing orders (auto-train): re-queued at the start of every planning
@@ -482,8 +491,15 @@ function renderConnect() {
           <label for="name-in">DISPLAY NAME</label>
           <input id="name-in" maxlength="24" placeholder="e.g. Meridian" value="${esc(S.name)}">
         </div>
+        <div class="field">
+          <label for="map-in">BATTLEFIELD</label>
+          <select id="map-in">
+            ${Object.values(MAPS).map((m) => `<option value="${m.id}" ${m.id === (localStorage.getItem('sd_map') || DEFAULT_MAP) ? 'selected' : ''}>${esc(m.name)} — ${m.regions.length} regions</option>`).join('')}
+          </select>
+        </div>
+        <div class="body" id="map-blurb">${esc(MAPS[localStorage.getItem('sd_map')]?.blurb || MAPS[DEFAULT_MAP].blurb)}</div>
         <div class="rule"></div>
-        <div class="body">Your opponent sees this name across the table. Everything else about you stays behind the fog.</div>
+        <div class="body">The battlefield applies to matches you create here — online, pass-and-play or vs the Daemon.</div>
       </div>
       <div class="paper-card">
         <div class="eyebrow">START A MATCH</div>
@@ -585,7 +601,7 @@ function renderLobby() {
       </div>
     </div>
     <div class="info-bar">
-      <div class="cell"><div class="k">MAP</div><div class="v">24 regions · Fractured Belt</div></div>
+      <div class="cell"><div class="k">MAP</div><div class="v">${S.sync.match.map ? `${S.sync.match.map.regionCount} regions · ${esc(S.sync.match.map.name)}` : '—'}</div></div>
       <div class="sep"></div>
       <div class="cell"><div class="k">PACING</div><div class="v">${pacing}</div></div>
       <div class="sep"></div>
@@ -755,7 +771,7 @@ function renderMap(v) {
   const topAlert = v.you.alerts[0];
   return `
   <div class="mapwrap">
-    <div class="mapscale" id="mapscale">${hexes}${routeLines(v)}</div>
+    <div class="mapscale" id="mapscale" data-w="${v.map.size.w}" data-h="${v.map.size.h}" style="width:${v.map.size.w}px;height:${v.map.size.h}px">${hexes}${routeLines(v)}</div>
     <div class="legend">
       <div class="item"><div class="sw" style="background:#2f4f8f;border:1px solid #6d9bf0"></div>Yours</div>
       <div class="item"><div class="sw" style="background:#6b4326;border:1px solid #e0a06f"></div>${esc(oppName())}</div>
@@ -845,7 +861,9 @@ function renderPickBanner() {
     ? 'Pick the region the satellite should watch'
     : S.ui.pick.type === 'retarget'
       ? 'Pick the new destination for this unit'
-      : 'Pick a region on the map';
+      : S.ui.pick.type === 'retarget-group'
+        ? `Pick where to send the ${S.ui.pick.units.length} selected swarm group${S.ui.pick.units.length === 1 ? '' : 's'}`
+        : 'Pick a region on the map';
   return `<div class="pick-banner">${label} <button data-act="pick-cancel">cancel</button></div>`;
 }
 
@@ -1147,7 +1165,27 @@ function renderSidebar(v) {
   const garrison = (mine || live) ? (r.garrison ?? 0) : r.intel ? `${r.intel.garrison}?` : 'unknown';
 
   const fighters = unitsAt(id).filter((u) => u.type !== 'bot');
-  const unitRows = fighters.map((u) => {
+  const mySwarmsHere = fighters
+    .filter((u) => u.owner === mySide() && u.type === 'swarm')
+    .sort((a, b) => (b.strength || 0) - (a.strength || 0));
+  const groupable = mySwarmsHere.length > 1;
+  const groupRow = groupable ? (() => {
+    const total = mySwarmsHere.reduce((s, u) => s + (u.strength || 0), 0);
+    const n = Math.min(S.ui.swarmSend ?? mySwarmsHere.length, mySwarmsHere.length);
+    const sel = mySwarmsHere.slice(0, n).reduce((s, u) => s + (u.strength || 0), 0);
+    return `
+    <div class="kv" style="flex-direction:column;align-items:stretch;gap:8px">
+      <div style="display:flex;justify-content:space-between"><span>Your swarms here</span><b>${mySwarmsHere.length} groups · strength ${total}</b></div>
+      <input type="range" id="swarm-slider" min="1" max="${mySwarmsHere.length}" value="${n}" style="width:100%;accent-color:#4a7fe0">
+      <div style="font-size:13px;color:var(--paper-muted)">Sending <b id="swarm-send-label">${n} group${n === 1 ? '' : 's'} (strength ${sel})</b> — slide to split the force</div>
+      <div style="display:flex;gap:6px">
+        <button class="paper-btn" style="flex:1;padding:6px 10px;font-size:13px" data-act="retarget-group" ${locked() ? 'disabled' : ''}>Redirect selected</button>
+        <button class="paper-btn" style="flex:1;padding:6px 10px;font-size:13px" data-act="disband-group" ${locked() ? 'disabled' : ''}>Disband selected</button>
+      </div>
+    </div>`;
+  })() : '';
+  const singles = groupable ? fighters.filter((u) => !(u.owner === mySide() && u.type === 'swarm')) : fighters;
+  const unitRows = groupRow + singles.map((u) => {
     const isMyUnit = u.owner === mySide();
     const label = u.type === 'swarm' ? `swarm (strength ${u.strength})` : 'worm';
     if (!isMyUnit) return `<div class="kv"><span>Their ${label} is here</span><b style="color:#c25b46">hostile</b></div>`;
@@ -1235,13 +1273,25 @@ function facilityStatusRows(v, id, r) {
   }).join('');
 }
 
+// Pathfinding over whatever map this match is on, via the view's own
+// adjacency data.
+function viewNeighbors() {
+  const nb = {};
+  for (const [id, r] of Object.entries(view().regions)) nb[id] = r.neighbors;
+  return nb;
+}
+
+function pathVia(from, to, blocked) {
+  return pathOn(viewNeighbors(), from, to, blocked);
+}
+
 // Route for defenders: through your own connected network only.
 function botPath(from, to) {
   const blocked = (rid) => {
     const rr = region(rid);
     return !rr || rr.owner !== mySide() || rr.isolated || rr.reconnecting > 0;
   };
-  return shortestPath(from, to, blocked);
+  return pathVia(from, to, blocked);
 }
 
 function botEta(from, to) {
@@ -1271,25 +1321,26 @@ function routeLines(v) {
       if (u.path?.length) poly([u.region, ...u.path], unitColor(u.type), 0.85, '3 9');
     } else if ((u.type === 'swarm' || u.type === 'worm') && u.target && u.target !== u.region) {
       // Their exact route is their business — draw the likely one.
-      poly([u.region, ...(shortestPath(u.region, u.target) || [])], '#e0803f', 0.55, '7 7');
+      poly([u.region, ...(pathVia(u.region, u.target) || [])], '#e0803f', 0.55, '7 7');
     }
   }
   // Attacks still in the build queue at a red team den.
   for (const b of v.you.builds) {
     if (b.kind === 'swarm' || b.kind === 'worm') {
-      poly([b.facility, ...(shortestPath(b.facility, b.target) || [])], unitColor(b.kind), 0.3, '2 8', 2.5);
+      poly([b.facility, ...(pathVia(b.facility, b.target) || [])], unitColor(b.kind), 0.3, '2 8', 2.5);
     }
   }
   // Orders queued this turn but not locked yet.
   for (const o of S.ui.pending) {
     if (o.kind === 'build_swarm' || o.kind === 'build_worm') {
-      poly([o.facility, ...(shortestPath(o.facility, o.target) || [])], unitColor(o.kind.slice(6)), 0.3, '2 8', 2.5);
+      poly([o.facility, ...(pathVia(o.facility, o.target) || [])], unitColor(o.kind.slice(6)), 0.3, '2 8', 2.5);
     } else if (o.kind === 'move_bots') {
       const p = botPath(o.from, o.to);
       if (p) poly([o.from, ...p], '#6d9bf0', 0.35, '2 8', 2.5);
     }
   }
-  return `<svg width="880" height="545" viewBox="0 0 880 545" style="position:absolute;left:0;top:0;pointer-events:none;overflow:visible">${lines.join('')}</svg>`;
+  const { w, h } = v.map.size;
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="position:absolute;left:0;top:0;pointer-events:none;overflow:visible">${lines.join('')}</svg>`;
 }
 
 function buildLabel(b) {
@@ -1481,6 +1532,14 @@ function renderActions(v, r) {
       disabled: !facilityFree('LNC') || left < c.satellite,
       why: !facilityFree('LNC') ? 'Every uplink station is busy (or you have none)' : '',
     }));
+    const allSwarms = view().units.filter((u) => u.owner === mySide() && u.type === 'swarm');
+    if (allSwarms.length) {
+      const total = allSwarms.reduce((s, u) => s + (u.strength || 0), 0);
+      out.push(actionBtn({
+        act: 'rally', label: 'Rally all swarms here', detail: `Every swarm you have (${allSwarms.length} group${allSwarms.length === 1 ? '' : 's'}, strength ${total}) reroutes to this region`,
+        cost: '§0', time: 'now', color: '#d8624f',
+      }));
+    }
   }
   return out.join('');
 }
@@ -1582,7 +1641,7 @@ $app.addEventListener('click', (ev) => {
     case 'create': {
       const name = readName();
       if (!name) return;
-      send({ t: 'create', name, pacing: document.getElementById('pacing-in')?.value || 'live' });
+      send({ t: 'create', name, pacing: document.getElementById('pacing-in')?.value || 'live', map: chosenMap() });
       break;
     }
     case 'join': {
@@ -1606,7 +1665,7 @@ $app.addEventListener('click', (ev) => {
       const p2 = ai ? 'The Daemon' : (document.getElementById('name2-in')?.value || '').trim() || 'Player 2';
       S.name = p1;
       localStorage.setItem('sd_name', p1);
-      startLocal(p1, p2, { ai });
+      startLocal(p1, p2, { ai, map: chosenMap() });
       break;
     }
     case 'resume-save': {
@@ -1662,6 +1721,7 @@ $app.addEventListener('click', (ev) => {
         S.ui.pick = null;
         if (pick.type === 'moveSat') addOrder({ kind: 'move_satellite', sat: pick.sat, target: arg });
         else if (pick.type === 'retarget') addOrder({ kind: 'retarget', unit: pick.unit, target: arg, unitType: pick.unitType });
+        else if (pick.type === 'retarget-group') addOrder({ kind: 'retarget_group', units: pick.units, target: arg });
         S.ui.tab = 'map';
         render();
         return;
@@ -1671,6 +1731,7 @@ $app.addEventListener('click', (ev) => {
       S.ui.reinforceMenu = false;
       S.ui.decomMenu = false;
       S.ui.attackMenu = null;
+      S.ui.swarmSend = null;
       S.ui.tab = 'map';
       S.ui.sawMap = true;
       S.ui.lockConfirm = false;
@@ -1717,6 +1778,23 @@ $app.addEventListener('click', (ev) => {
     case 'retarget': {
       const u = view().units.find((x) => x.id === Number(arg));
       if (u) { S.ui.pick = { type: 'retarget', unit: u.id, unitType: u.type }; S.ui.tab = 'map'; render(); }
+      break;
+    }
+    case 'retarget-group':
+    case 'disband-group': {
+      const here = view().units
+        .filter((u) => u.owner === mySide() && u.type === 'swarm' && u.region === sel())
+        .sort((a, b) => (b.strength || 0) - (a.strength || 0));
+      const n = Math.min(S.ui.swarmSend ?? here.length, here.length);
+      const units = here.slice(0, n).map((u) => u.id);
+      if (!units.length) break;
+      if (act === 'disband-group') addOrder({ kind: 'disband_group', units });
+      else { S.ui.pick = { type: 'retarget-group', units }; S.ui.tab = 'map'; render(); }
+      break;
+    }
+    case 'rally': {
+      const units = view().units.filter((u) => u.owner === mySide() && u.type === 'swarm').map((u) => u.id);
+      if (units.length) addOrder({ kind: 'retarget_group', units, target: sel() });
       break;
     }
     case 'claim': addOrder({ kind: 'claim', region: sel() }); break;
@@ -1786,6 +1864,25 @@ $app.addEventListener('input', (ev) => {
     S.name = ev.target.value;
     localStorage.setItem('sd_name', S.name);
   }
+  if (ev.target.id === 'swarm-slider') {
+    // Update the label live without re-rendering (that would kill the drag).
+    S.ui.swarmSend = Number(ev.target.value);
+    const here = view().units
+      .filter((u) => u.owner === mySide() && u.type === 'swarm' && u.region === S.ui.selected)
+      .sort((a, b) => (b.strength || 0) - (a.strength || 0));
+    const n = Math.min(S.ui.swarmSend, here.length);
+    const sel = here.slice(0, n).reduce((s, u) => s + (u.strength || 0), 0);
+    const label = document.getElementById('swarm-send-label');
+    if (label) label.textContent = `${n} group${n === 1 ? '' : 's'} (strength ${sel})`;
+  }
+});
+
+$app.addEventListener('change', (ev) => {
+  if (ev.target.id === 'map-in') {
+    localStorage.setItem('sd_map', ev.target.value);
+    const blurb = document.getElementById('map-blurb');
+    if (blurb) blurb.textContent = MAPS[ev.target.value]?.blurb || '';
+  }
 });
 
 $app.addEventListener('change', (ev) => {
@@ -1804,6 +1901,12 @@ $app.addEventListener('change', (ev) => {
   };
   reader.readAsText(ev.target.files[0]);
 });
+
+function chosenMap() {
+  const id = document.getElementById('map-in')?.value || localStorage.getItem('sd_map') || DEFAULT_MAP;
+  localStorage.setItem('sd_map', id);
+  return id;
+}
 
 function readName() {
   const el = document.getElementById('name-in');
@@ -1825,12 +1928,14 @@ function readName() {
 function fitMap() {
   const scaleEl = document.getElementById('mapscale');
   if (!scaleEl) return;
+  const w = Number(scaleEl.dataset.w) || 880;
+  const h = Number(scaleEl.dataset.h) || 545;
   const wrap = scaleEl.parentElement;
   const availW = wrap.clientWidth - 40;
   const availH = wrap.clientHeight - 100; // leave room for the legend row
-  const scale = Math.min(1.6, availW / 880, availH / 545); // fill the space, don't just shrink
-  const x = Math.max(20, (wrap.clientWidth - 880 * scale) / 2);
-  const y = Math.max(16, (wrap.clientHeight - 90 - 545 * scale) / 2);
+  const scale = Math.min(1.6, availW / w, availH / h); // fill the space, don't just shrink
+  const x = Math.max(20, (wrap.clientWidth - w * scale) / 2);
+  const y = Math.max(16, (wrap.clientHeight - 90 - h * scale) / 2);
   scaleEl.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
 }
 

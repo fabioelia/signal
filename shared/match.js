@@ -8,14 +8,16 @@
 import { createMatch, validateOrders, resolveTurn } from './engine.js';
 import { buildView } from './view.js';
 import { RULES } from './constants.js';
+import { mapDef } from './map.js';
 
 const SIDES = ['A', 'B'];
 const GRACE_MS = 2500;
 
 export class Match {
-  constructor(code, pacing = 'live') {
+  constructor(code, pacing = 'live', mapId) {
     this.code = code;
     this.pacing = pacing === 'relaxed' ? 'relaxed' : 'live';
+    this.mapId = mapDef(mapId).id;
     this.phase = 'lobby'; // lobby -> planning -> over
     this.players = { A: null, B: null };
     this.state = null;
@@ -87,7 +89,7 @@ export class Match {
   }
 
   start() {
-    this.state = createMatch({ A: this.players.A.name, B: this.players.B.name });
+    this.state = createMatch({ A: this.players.A.name, B: this.players.B.name }, this.mapId);
     this.phase = 'planning';
     this.startPlanning();
   }
@@ -177,6 +179,10 @@ export class Match {
         phase: this.phase,
         deadline: this.deadline,
         planningSeconds: RULES.planningSeconds,
+        map: (() => {
+          const M = mapDef(this.mapId);
+          return { id: M.id, name: M.name, blurb: M.blurb, regionCount: M.regions.length };
+        })(),
       },
       you: {
         side,

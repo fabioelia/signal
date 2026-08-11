@@ -14,7 +14,7 @@
 //   6. economy: connectivity, starvation, income and upkeep, win checks
 //   7. detection and vision update (intel snapshots, staleness, alerts)
 
-import { REGIONS, NEIGHBORS, START, adjacent, shortestPath } from './map.js';
+import { mapDef, DEFAULT_MAP, pathOn } from './map.js';
 import { RULES, WORM_TARGET_PRIORITY } from './constants.js';
 
 const SIDES = ['A', 'B'];
@@ -26,8 +26,10 @@ const clone = (v) => structuredClone(v);
 // State construction
 // ---------------------------------------------------------------------------
 
-export function createMatch(names = { A: 'Player A', B: 'Player B' }) {
+export function createMatch(names = { A: 'Player A', B: 'Player B' }, mapId = DEFAULT_MAP) {
+  const M = mapDef(mapId);
   const state = {
+    map: M.id,
     turn: 1,
     nextId: 1,
     regions: {},
@@ -37,7 +39,7 @@ export function createMatch(names = { A: 'Player A', B: 'Player B' }) {
     winReason: null,
   };
 
-  for (const r of REGIONS) {
+  for (const r of M.regions) {
     state.regions[r.id] = {
       id: r.id,
       owner: null,
@@ -52,7 +54,7 @@ export function createMatch(names = { A: 'Player A', B: 'Player B' }) {
     state.players[side] = {
       side,
       name: names[side] || `Player ${side}`,
-      capital: START[side].capital,
+      capital: M.start[side].capital,
       funding: RULES.startingFunding,
       income: 0,
       negStreak: 0,
@@ -65,7 +67,7 @@ export function createMatch(names = { A: 'Player A', B: 'Player B' }) {
     };
   }
 
-  for (const [ra, rb, nodes, garrison] of START.cluster) {
+  for (const [ra, rb, nodes, garrison] of M.start.cluster) {
     for (const [side, id] of [['A', ra], ['B', rb]]) {
       const region = state.regions[id];
       region.owner = side;
@@ -114,6 +116,7 @@ export function capitalNode(state, side) {
 // Regions receiving support: reachable from the capital through owned regions
 // that are neither isolated nor reconnecting.
 export function connectedSet(state, side) {
+  const M = mapDef(state.map);
   const capId = state.players[side].capital;
   const cap = state.regions[capId];
   const set = new Set();
@@ -121,7 +124,7 @@ export function connectedSet(state, side) {
   const queue = [capId];
   set.add(capId);
   while (queue.length) {
-    for (const next of NEIGHBORS[queue.shift()]) {
+    for (const next of M.neighbors[queue.shift()]) {
       const r = state.regions[next];
       if (set.has(next) || r.owner !== side || r.isolated || r.reconnecting > 0) continue;
       set.add(next);
@@ -134,17 +137,18 @@ export function connectedSet(state, side) {
 // sight: regions whose full contents you can see (except stealth worms).
 // detect: regions where stealthy worms are revealed (analysts + satellites).
 export function computeVision(state, side) {
+  const M = mapDef(state.map);
   const sight = new Set();
   const detect = new Set();
   const cover = (id) => {
     sight.add(id);
     detect.add(id);
-    for (const n of NEIGHBORS[id]) {
+    for (const n of M.neighbors[id]) {
       sight.add(n);
       detect.add(n);
     }
   };
-  for (const r of REGIONS) {
+  for (const r of M.regions) {
     const region = state.regions[r.id];
     if (region.owner === side) {
       sight.add(r.id);
@@ -204,7 +208,7 @@ export function economyOf(state, side) {
 }
 
 function analystNearby(state, side, regionId) {
-  const ids = [regionId, ...NEIGHBORS[regionId]];
+  const ids = [regionId, ...mapDef(state.map).neighbors[regionId]];
   return ids.some((id) => {
     const r = state.regions[id];
     return r.owner === side && nodesOf(r, 'ANL').length > 0;
@@ -235,7 +239,7 @@ function routeFor(state, u, target) {
     if (id === target && u.type !== 'bot') return false;
     return unitBlocked(state, u, id);
   };
-  return shortestPath(u.region, target, blocked);
+  return pathOn(mapDef(state.map).neighbors, u.region, target, blocked);
 }
 
 function facilityLoad(state, side, kind) {
@@ -254,17 +258,18 @@ function facilityLoad(state, side, kind) {
 
 function pickFacility(state, side, nodeType, nearTarget, extraLoad) {
   // Idle facility of the given type, closest to the target (stable tie-break).
+  const M = mapDef(state.map);
   const load = facilityLoad(state, side, nodeType);
   let best = null;
   let bestDist = Infinity;
-  for (const r of REGIONS) {
+  for (const r of M.regions) {
     const region = state.regions[r.id];
     if (region.owner !== side) continue;
     const capacity = nodesOf(region, nodeType).length;
     if (capacity === 0) continue;
     const used = (load[r.id] || 0) + (extraLoad[r.id] || 0);
     if (used >= capacity) continue;
-    const dist = nearTarget ? (shortestPath(r.id, nearTarget) || []).length : 0;
+    const dist = nearTarget ? (pathOn(M.neighbors, r.id, nearTarget) || []).length : 0;
     if (dist < bestDist) {
       bestDist = dist;
       best = r.id;
@@ -353,7 +358,7 @@ export function validateOrders(state, side, orders) {
           reject(o, 'already being claimed'); continue;
         }
         const conn = connectedSet(state, side);
-        const border = NEIGHBORS[o.region].some((n) => conn.has(n));
+        const border = mapDef(state.map).neighbors[o.region].some((n) => conn.has(n));
         if (!border) { reject(o, 'must border your connected network'); continue; }
         if (!costOf(RULES.costs.claim)) { reject(o, 'not enough funding'); continue; }
         claimed.add(o.region);
@@ -404,7 +409,7 @@ export function validateOrders(state, side, orders) {
         if (o.route) {
           let prev = facility;
           const ok = Array.isArray(o.route) && o.route.length &&
-            o.route.every((id) => { const a = adjacent(prev, id); prev = id; return a && state.regions[id]; }) &&
+            o.route.every((id) => { const a = mapDef(state.map).neighbors[prev]?.includes(id); prev = id; return a && state.regions[id]; }) &&
             o.route[o.route.length - 1] === o.target;
           if (!ok) { reject(o, 'route is not a linked path to the target'); continue; }
         }
@@ -506,7 +511,8 @@ export function resolveTurn(prevState, orders) {
   };
   const bySide = { A: orders.A || [], B: orders.B || [] };
   const name = (side) => state.players[side].name;
-  const regionName = (id) => REGIONS.find((r) => r.id === id)?.name || id;
+  const M = mapDef(state.map);
+  const regionName = (id) => M.byId[id]?.name || id;
 
   // -- Step 0: pay for orders and enqueue builds ---------------------------
   const sweeps = [];
@@ -594,7 +600,7 @@ export function resolveTurn(prevState, orders) {
   }
 
   // -- Step 1: isolation ----------------------------------------------------
-  for (const r of REGIONS) {
+  for (const r of M.regions) {
     const region = state.regions[r.id];
     if (region.reconnecting > 0) {
       region.reconnecting -= 1;
@@ -633,7 +639,7 @@ export function resolveTurn(prevState, orders) {
     const u = state.units.find((x) => x.id === o.unit && x.owner === side && (x.type === 'swarm' || x.type === 'worm'));
     if (!u) continue;
     u.target = o.target;
-    u.path = u.region === o.target ? [] : routeFor(state, u, o.target) || shortestPath(u.region, o.target) || [];
+    u.path = u.region === o.target ? [] : routeFor(state, u, o.target) || pathOn(M.neighbors, u.region, o.target) || [];
     log(side, 2, `Your ${u.type} has new orders`, `Now heading for ${regionName(o.target)} — ${u.path.length} turn${u.path.length === 1 ? '' : 's'} of travel.`, '#4a7fe0');
   }
   for (const [side, o] of botMoves) {
@@ -696,7 +702,7 @@ export function resolveTurn(prevState, orders) {
 
   // -- Step 3: combat -------------------------------------------------------
   const removeUnits = (ids) => { state.units = state.units.filter((u) => !ids.has(u.id)); };
-  for (const r of REGIONS) {
+  for (const r of M.regions) {
     const region = state.regions[r.id];
     const here = unitsIn(state, r.id);
     const swarmsOf = (side) => here.filter((u) => u.type === 'swarm' && u.owner === side);
@@ -758,7 +764,7 @@ export function resolveTurn(prevState, orders) {
   // Capture / siege: attacking swarms standing at their target with no
   // defenders left. Capitals are besieged (Command centre takes damage);
   // other regions flip and their structures are smashed.
-  for (const r of REGIONS) {
+  for (const r of M.regions) {
     const region = state.regions[r.id];
     if (!region.owner) continue;
     const defSide = region.owner;
@@ -866,7 +872,7 @@ export function resolveTurn(prevState, orders) {
     const player = state.players[side];
     const conn = connectedSet(state, side);
     let starvedNote = 0;
-    for (const r of REGIONS) {
+    for (const r of M.regions) {
       const region = state.regions[r.id];
       if (region.owner !== side) continue;
       const supported = conn.has(r.id);
@@ -1017,7 +1023,7 @@ function completeBuild(state, side, b, log, regionName, name) {
       const stub = { owner: side, type: b.kind, region: b.facility };
       const path = b.route
         ? [...b.route]
-        : routeFor(state, stub, b.target) || shortestPath(b.facility, b.target) || [];
+        : routeFor(state, stub, b.target) || pathOn(mapDef(state.map).neighbors, b.facility, b.target) || [];
       const unit = {
         id: state.nextId++,
         owner: side,
@@ -1077,7 +1083,7 @@ function refreshIntel(state) {
     const player = state.players[side];
     const enemy = enemyOf(side);
     const sight = new Set(player.sight);
-    for (const r of REGIONS) {
+    for (const r of mapDef(state.map).regions) {
       const region = state.regions[r.id];
       if (region.owner !== enemy) {
         delete player.intel[r.id];
@@ -1120,7 +1126,7 @@ function refreshAlerts(state) {
     }
     for (const b of state.players[enemy].builds) {
       if ((b.kind === 'swarm' || b.kind === 'worm') && b.target && state.regions[b.target].owner === side) {
-        const dist = (shortestPath(b.facility, b.target) || []).length;
+        const dist = (pathOn(mapDef(state.map).neighbors, b.facility, b.target) || []).length;
         if (sight.has(b.facility)) {
           alerts.push({ type: 'build', buildType: b.kind, region: b.target, eta: b.turnsLeft + dist });
         } else if (detect.has(b.target)) {

@@ -19,9 +19,7 @@
 //      route around the opponent's (public) satellite footprints.
 
 import { RULES } from '../shared/constants.js';
-import { shortestPath } from '../shared/map.js';
-
-const dist = (a, b) => (shortestPath(a, b) || []).length || 99;
+import { pathOn } from '../shared/map.js';
 const mode = (arr) => {
   const counts = {};
   let best = null;
@@ -38,6 +36,11 @@ export function aiOrders(view) {
   const me = view.side;
   let budget = view.you.funding;
   const spend = (cost) => (cost <= budget ? ((budget -= cost), true) : false);
+
+  // The view carries the map's own adjacency, so the Daemon works on any map.
+  const NB = {};
+  for (const [id, r] of Object.entries(view.regions)) NB[id] = r.neighbors;
+  const dist = (a, b) => (pathOn(NB, a, b) || []).length || 99;
 
   const regions = Object.values(view.regions);
   const mine = regions.filter((r) => r.owner === me);
@@ -249,7 +252,7 @@ export function aiOrders(view) {
           hot.add(s.region);
           for (const n of view.regions[s.region]?.neighbors || []) hot.add(n);
         }
-        const route = shortestPath(den.id, wTarget, (id) => id !== wTarget && (hot.has(id) || view.regions[id]?.isolated));
+        const route = pathOn(NB, den.id, wTarget, (id) => id !== wTarget && (hot.has(id) || view.regions[id]?.isolated));
         if (route) {
           o.facility = den.id;
           o.route = route;

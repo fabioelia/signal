@@ -172,6 +172,23 @@ overlay, and used as `step` numbers in the report):
 
 ## Changelog
 
+**v0.7.0** — swarm command & control + geographical maps:
+- **Grouped swarm control**: when a tile holds several of your swarms, the
+  region panel shows one combined control with a **slider** to choose how
+  much force to peel off (strongest groups first), then redirect or
+  disband the selected portion in one order. Plus **"Rally all swarms
+  here"** on any target region — every swarm you own reroutes in one click,
+  collapsed into a single order chip.
+- **Three battlefields**, chosen when creating any match (online, hot-seat
+  or vs the Daemon): the original *Fractured Belt* (24 regions, open
+  ground), *The Straits* (32 — two continents joined only by two causeways;
+  hold the crossings or starve), and *Archipelago* (28 — island homes
+  around a contested 4-tile core). Every map is provably fair — built by
+  mirroring one half through a 180° rotation, with tests asserting the
+  symmetry, connectivity and the intended chokepoints.
+- The map layer is now a data-driven registry: engine, AI and client all
+  work on any map (the Daemon plays all three — tested).
+
 **v0.6.0** — a smarter, harder Daemon + sharper gameplay reads:
 - **Daemon v2.** New doctrine: it reserves a war chest before economic
   spending, masses simultaneous swarm waves sized against your estimated

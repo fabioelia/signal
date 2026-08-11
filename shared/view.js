@@ -2,7 +2,7 @@
 // to see. The server sends ONLY this to each client — the full state never
 // leaves the server, so a modified client cannot peek through the fog.
 
-import { REGIONS, NEIGHBORS } from './map.js';
+import { mapDef } from './map.js';
 import { RULES } from './constants.js';
 import { enemyOf, botsIn, connectedSet, economyOf } from './engine.js';
 
@@ -13,8 +13,9 @@ export function buildView(state, side) {
   const sight = new Set(player.sight);
   const conn = connectedSet(state, side);
 
+  const M = mapDef(state.map);
   const regions = {};
-  for (const r of REGIONS) {
+  for (const r of M.regions) {
     const region = state.regions[r.id];
     const visible = region.owner === side || sight.has(r.id);
     const out = {
@@ -25,7 +26,7 @@ export function buildView(state, side) {
       owner: region.owner,          // topology and ownership are public
       isolated: region.isolated,    // quarantines are visible commitments
       reconnecting: region.reconnecting,
-      neighbors: NEIGHBORS[r.id],
+      neighbors: M.neighbors[r.id],
       visible,
       connected: region.owner === side ? conn.has(r.id) : null,
       starved: region.owner === side ? region.starved : null,
@@ -90,6 +91,7 @@ export function buildView(state, side) {
 
   return {
     side,
+    map: { id: M.id, name: M.name, blurb: M.blurb, size: M.size, regionCount: M.regions.length },
     turn: state.turn,
     winner: state.winner,
     winReason: state.winReason,
