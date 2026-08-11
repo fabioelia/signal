@@ -161,9 +161,23 @@ overlay, and used as `step` numbers in the report):
   turns out — type unknown"); full sight of the enemy facility reveals the
   build itself. In-progress builds can be cancelled for a 50% refund, so
   feints are possible but cost real money.
+- **Managing the treasury:** the Funds tab itemizes every § of income and
+  upkeep. Finished structures can be **decommissioned** (25% of their cost
+  back, upkeep stops) and units **disbanded**; swarms and worms can be
+  **redirected** mid-route, and you choose which ops centre builds them when
+  more than one is idle.
 - **Winning:** destroy the opponent's Command centre (walk swarms in, or worm
   it), or starve them — 5 consecutive turns of negative income is an economic
   collapse. Matches are tuned toward 20–40 turns.
+
+## Changelog
+
+**v0.2.0** — first playtest feedback round: Funds tab (itemized income/
+upkeep, assets, builds, field units), decommission/disband/redirect orders,
+swarm origin choice, build-menu effect descriptions, "held — way in is cut
+off" and decay indicators, remaining-funds display in the order bar,
+resolution overlay leads back to the map (with a lock-without-looking
+nudge), and a visible version number.
 
 ## What's deliberately simplified (next steps)
 

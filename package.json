@@ -1,6 +1,6 @@
 {
   "name": "signal-dominion",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SIGNAL DOMINION — 2-player online turn-based cyber-strategy game (WEGO)",
   "type": "module",
   "main": "server/index.js",

@@ -15,8 +15,9 @@
 // Imported relative to this module: on the Node server app.js is served at
 // /app.js so this resolves to /shared/…; on GitHub Pages it's
 // /signal/public/app.js so this resolves to /signal/shared/… — both correct.
-import { NODE_META, RULES, RESOLUTION_STEPS } from '../shared/constants.js';
+import { NODE_META, RULES, RESOLUTION_STEPS, VERSION } from '../shared/constants.js';
 import { Match } from '../shared/match.js';
+import { shortestPath } from '../shared/map.js';
 
 const $app = document.getElementById('app');
 
@@ -39,13 +40,17 @@ const S = {
     tab: 'map',
     selected: null,
     pending: [],
-    pick: null,        // {type:'sat'} | {type:'moveSat', sat}
+    pick: null,        // {type:'moveSat', sat} | {type:'retarget', unit}
     buildMenu: false,
     reinforceMenu: false,
+    decomMenu: false,
+    attackMenu: null,  // 'swarm' | 'worm' — origin picker when several ops are idle
     resolve: null,     // {turn, log} — resolution overlay
     toast: null,
     autoLocked: false,
     hideOver: false,
+    sawMap: true,      // has the player looked at the map since the last resolution?
+    lockConfirm: false,
   },
 };
 
@@ -117,6 +122,8 @@ function handleMessage(msg) {
       if (msg.resolved && msg.view && msg.view.turn > prevTurn && prevTurn > 0) {
         S.ui.pending = [];
         S.ui.autoLocked = false;
+        S.ui.sawMap = S.ui.tab === 'map';
+        S.ui.lockConfirm = false;
         S.ui.resolve = { turn: msg.view.turn - 1, log: msg.log || [] };
         const rejects = msg.you?.lockResult?.rejected || [];
         if (rejects.length) {
@@ -169,6 +176,8 @@ function applyLocalSync(side) {
   S.sync = seat.sync;
   if (seat.pendingResolve) {
     S.ui.pending = [];
+    S.ui.sawMap = S.ui.tab === 'map';
+    S.ui.lockConfirm = false;
     S.ui.resolve = seat.pendingResolve;
     seat.pendingResolve = null;
     const rejects = seat.sync.you?.lockResult?.rejected || [];
@@ -202,9 +211,14 @@ function takeSeat(side) {
   S.ui.pending = [];
   S.ui.buildMenu = false;
   S.ui.reinforceMenu = false;
+  S.ui.decomMenu = false;
+  S.ui.attackMenu = null;
   S.ui.resolve = null;
   S.ui.pick = null;
   S.ui.selected = null;
+  S.ui.tab = 'map';
+  S.ui.sawMap = true;
+  S.ui.lockConfirm = false;
   applyLocalSync(side);
 }
 
@@ -275,6 +289,29 @@ function facilityFree(nodeType) {
   return busy < capacity;
 }
 
+// Regions with at least one ops centre that isn't already building something.
+function idleOpsRegions() {
+  const v = view();
+  const load = {};
+  for (const b of v.you.builds) {
+    if (b.kind === 'swarm' || b.kind === 'worm') load[b.facility] = (load[b.facility] || 0) + 1;
+  }
+  for (const o of S.ui.pending) {
+    if (o.kind === 'build_swarm' || o.kind === 'build_worm') load[o.facility] = (load[o.facility] || 0) + 1;
+  }
+  const out = [];
+  for (const r of Object.values(v.regions)) {
+    if (!isMine(r) || !r.nodes) continue;
+    const capacity = r.nodes.filter((n) => n.type === 'OPS').length;
+    if (capacity > (load[r.id] || 0)) out.push(r.id);
+  }
+  return out;
+}
+
+function travelEta(from, to) {
+  return (shortestPath(from, to) || []).length;
+}
+
 function orderChip(o) {
   const t = RULES.turns;
   const cost = estCost(o);
@@ -286,19 +323,23 @@ function orderChip(o) {
     case 'isolate': return { label: `Cut off ${regionName(o.region)}`, meta: 'Reconnect takes 2 turns', color: '#e8b53f' };
     case 'reconnect': return { label: `Reconnect ${regionName(o.region)}`, meta: `${RULES.reconnectTurns} turns · vulnerable meanwhile`, color: '#e8b53f' };
     case 'sweep': return { label: `Sweep ${regionName(o.region)}`, meta: `1 turn · §${cost}`, color: '#8f5fc7' };
-    case 'build_swarm': return { label: `Swarm push on ${regionName(o.target)}`, meta: `builds ${t.swarm} turns · §${cost}`, color: '#d8624f' };
-    case 'build_worm': return { label: `Worm run at ${regionName(o.target)}`, meta: `builds ${t.worm} turns · §${cost}`, color: '#d8624f' };
+    case 'build_swarm': return { label: `Swarm push on ${regionName(o.target)}`, meta: `from ${regionName(o.facility)} · ${t.swarm} turns to build · §${cost}`, color: '#d8624f' };
+    case 'build_worm': return { label: `Worm run at ${regionName(o.target)}`, meta: `from ${regionName(o.facility)} · ${t.worm} turns to build · §${cost}`, color: '#d8624f' };
     case 'build_satellite': return { label: `Satellite over ${regionName(o.target)}`, meta: `${t.satellite} turns · §${cost}`, color: '#c48a1e' };
     case 'build_asat': return { label: 'Build a satellite killer', meta: `${t.asat} turns · §${cost}`, color: '#d8624f' };
     case 'move_satellite': return { label: `Move satellite to ${regionName(o.target)}`, meta: `${t.moveSat} turns · §${cost}`, color: '#c48a1e' };
     case 'cancel_build': return { label: `Cancel: ${esc(o.label || 'build')}`, meta: `refund §${o.refund ?? '?'}`, color: '#8d99ab' };
+    case 'demolish': return { label: `Remove ${NODE_META[o.type].label.toLowerCase()} at ${regionName(o.region)}`, meta: `get §${Math.floor(RULES.costs.node[o.type] * RULES.demolishRefund)} back · upkeep stops`, color: '#8d99ab' };
+    case 'disband': return { label: `Disband your ${o.unitType || 'unit'}`, meta: 'upkeep stops', color: '#8d99ab' };
+    case 'disband_bots': return { label: `Disband ${o.count} defender${o.count === 1 ? '' : 's'} at ${regionName(o.region)}`, meta: 'upkeep stops', color: '#8d99ab' };
+    case 'retarget': return { label: `Redirect ${o.unitType || 'unit'} to ${regionName(o.target)}`, meta: 'reroutes this turn', color: '#4a7fe0' };
     default: return { label: o.kind, meta: '', color: '#8d99ab' };
   }
 }
 
 function addOrder(o) {
   if (!planning() || locked()) return;
-  if (o.kind === 'move_bots' || o.kind === 'train_bots') {
+  if (o.kind === 'move_bots' || o.kind === 'train_bots' || o.kind === 'disband_bots') {
     const same = S.ui.pending.find((p) => p.kind === o.kind && p.region === o.region && p.from === o.from && p.to === o.to);
     if (same) {
       const max = o.kind === 'train_bots' ? 5 : (o.maxCount ?? 99);
@@ -310,12 +351,14 @@ function addOrder(o) {
   S.ui.pending.push(o);
   S.ui.buildMenu = false;
   S.ui.reinforceMenu = false;
+  S.ui.decomMenu = false;
+  S.ui.attackMenu = null;
   render();
 }
 
 function lockIn() {
   if (!planning() || locked()) return;
-  send({ t: 'lock', orders: S.ui.pending.map(({ maxCount, label, refund, ...o }) => o) });
+  send({ t: 'lock', orders: S.ui.pending.map(({ maxCount, label, refund, unitType, ...o }) => o) });
 }
 
 // --------------------------------------------------------------------------
@@ -328,7 +371,7 @@ function render() {
   if (!S.sync || !S.joined) html = renderConnect();
   else if (S.sync.match.phase === 'lobby') html = renderLobby();
   else html = renderGame(v);
-  if (S.conn === 'closed') {
+  if (S.conn === 'closed' && !local) {
     html += `<div class="conn-banner">Connection lost — reconnecting…</div>`;
   }
   $app.innerHTML = html;
@@ -344,7 +387,7 @@ function renderConnect() {
   return `
   <div class="screen" style="overflow:auto">
     <div class="wordmark"><div class="mark"></div><div class="word">SIGNAL DOMINION</div></div>
-    <div class="tagline">Two governments, one network. Plan in private, resolve together — first capital to fall ends it.</div>
+    <div class="tagline">Two governments, one network. Plan in private, resolve together — first capital to fall ends it. <span style="font-family:var(--mono);font-size:13px;color:#6f7b8d">v${VERSION}</span></div>
     ${S.err ? `<div class="error-note">${esc(S.err)}</div>` : ''}
     ${S.waitingNote ? `<div class="error-note" style="background:#10263e;border-color:#2f5686;color:#cfe2fb">${esc(S.waitingNote)}</div>` : ''}
     <div class="card-row">
@@ -468,6 +511,7 @@ function renderGame(v) {
       ${renderRail(v)}
       <div class="stage">
         ${S.ui.tab === 'map' ? renderMap(v) : ''}
+        ${S.ui.tab === 'econ' ? renderEconomy(v) : ''}
         ${S.ui.tab === 'orbit' ? renderOrbit(v) : ''}
         ${S.ui.tab === 'intel' ? renderIntel(v) : ''}
         ${S.ui.tab === 'log' ? renderLog(v) : ''}
@@ -509,7 +553,8 @@ function renderTopbar(v) {
     <div class="brand">
       <div class="mark"></div>
       <div class="word">SIGNAL DOMINION</div>
-      <div class="code">${esc(m.code)}</div>
+      <div class="code" title="match code">${esc(m.code)}</div>
+      <div class="code" title="game version" style="border:none;padding:4px 2px">v${VERSION}</div>
     </div>
     <div style="display:flex;align-items:center;gap:16px">
       <div class="turn-pill">
@@ -538,6 +583,7 @@ function renderTopbar(v) {
 function renderRail(v) {
   const tabs = [
     ['map', 'Map', 'border-radius:6px'],
+    ['econ', 'Funds', 'border-radius:8px'],
     ['orbit', 'Orbit', 'border-radius:50%'],
     ['intel', 'Intel', 'border-radius:3px'],
     ['log', 'Report', 'border-radius:4px'],
@@ -631,8 +677,95 @@ function alertText(a) {
 function renderPickBanner() {
   const label = S.ui.pick.type === 'moveSat'
     ? 'Pick the region the satellite should watch'
-    : 'Pick the region your new satellite should watch';
+    : S.ui.pick.type === 'retarget'
+      ? 'Pick the new destination for this unit'
+      : 'Pick a region on the map';
   return `<div class="pick-banner">${label} <button data-act="pick-cancel">cancel</button></div>`;
+}
+
+function renderEconomy(v) {
+  const eco = v.you.economy;
+  const line = (label, amount, note = '') => `
+    <div style="display:flex;justify-content:space-between;gap:12px;font-size:15px;padding:6px 0;border-bottom:1px solid var(--paper-line)">
+      <span style="color:var(--paper-soft)">${label}${note ? ` <span style="color:var(--paper-muted);font-size:13px">${note}</span>` : ''}</span>
+      <b style="font-family:var(--mono);font-weight:500">${amount >= 0 ? '+' : ''}§${amount}</b>
+    </div>`;
+  const incomeLines = [
+    eco.capitalIncome ? line('Command centre', eco.capitalIncome) : line('Command centre', 0, 'cut off — no income!'),
+    ...eco.finance.map((f) => line(`${regionName(f.region)}`, f.amount, f.count > 1 ? `${f.count} finance hubs` : 'finance hub')),
+  ].join('');
+  const upkeepLines = [
+    line(`Structures (${eco.counts.nodes})`, -eco.upkeep.nodes, `§${RULES.upkeep.node} each`),
+    line(`Defenders (${eco.counts.bots})`, -eco.upkeep.bots, `§${RULES.upkeep.bot} each`),
+    eco.counts.swarms ? line(`Swarms (${eco.counts.swarms})`, -eco.upkeep.swarms, `§${RULES.upkeep.swarm} each`) : '',
+    eco.counts.worms ? line(`Worms (${eco.counts.worms})`, -eco.upkeep.worms, `§${RULES.upkeep.worm} each`) : '',
+    eco.counts.satellites ? line(`Satellites (${eco.counts.satellites})`, -eco.upkeep.satellites, `§${RULES.upkeep.satellite} each`) : '',
+  ].join('');
+
+  const regionCards = Object.values(v.regions).filter((r) => isMine(r)).map((r) => {
+    const status = r.isolated ? '⚠ cut off (quarantined)'
+      : r.reconnecting > 0 ? `⚠ reconnecting (${r.reconnecting} left)`
+      : r.connected ? 'connected'
+      : '⚠ CUT OFF from capital';
+    const fins = (r.nodes || []).filter((n) => n.type === 'FIN').length;
+    const chips = (r.nodes || []).map((n) => `<span>${NODE_META[n.type].label}${n.hp < n.maxHp ? ` · ${Math.round((n.hp / n.maxHp) * 100)}%` : ''}</span>`).join('');
+    return `
+    <div class="intel-card" data-act="hex" data-arg="${r.id}" style="cursor:pointer">
+      <div class="row"><div class="name">${esc(r.name)}</div>
+        <div class="age" style="color:${r.connected && !r.isolated ? '#3f9c78' : '#c25b46'}">${status}</div></div>
+      <div class="summary">${(r.nodes || []).length}/${RULES.maxNodesPerRegion} structure slots · ${r.garrison ?? 0} defender${r.garrison === 1 ? '' : 's'}${fins && r.connected ? ` · earning §${fins * RULES.income.finance}/turn` : ''}</div>
+      <div class="chips">${chips || '<span style="background:transparent;color:#8b93a1">nothing built</span>'}</div>
+    </div>`;
+  }).join('');
+
+  const buildRows = v.you.builds.map((b) => `
+    <div style="display:flex;justify-content:space-between;gap:12px;font-size:15px;padding:6px 0;border-bottom:1px solid var(--paper-line)">
+      <span style="color:var(--paper-soft)">${buildLabel(b)}</span>
+      <span style="display:flex;gap:10px;align-items:center">
+        <b>${b.turnsLeft} turn${b.turnsLeft === 1 ? '' : 's'} left</b>
+        <button class="paper-btn" style="padding:3px 10px;font-size:12px" data-act="cancel-build" data-arg="${b.id}" ${locked() ? 'disabled' : ''}>Cancel · §${Math.floor(b.cost * RULES.refundRate)}</button>
+      </span>
+    </div>`).join('');
+
+  const unitRows = v.units.filter((u) => u.owner === mySide() && u.type !== 'bot').map((u) => `
+    <div style="display:flex;justify-content:space-between;gap:12px;font-size:15px;padding:6px 0;border-bottom:1px solid var(--paper-line)">
+      <span style="color:var(--paper-soft)">${u.type} at ${regionName(u.region)}${u.target && u.target !== u.region ? ` → ${regionName(u.target)} (${u.eta} turn${u.eta === 1 ? '' : 's'})` : ' · idle'}${u.held ? ' · <b style="color:#c25b46">held — way in is cut off</b>' : ''}</span>
+      <button class="paper-btn" style="padding:3px 10px;font-size:12px" data-act="disband" data-arg="${u.id}" ${locked() ? 'disabled' : ''}>Disband</button>
+    </div>`).join('');
+
+  return `
+  <div class="pane">
+    <div>
+      <div class="pane-title">Funds</div>
+      <div class="pane-sub">§${v.you.funding} in the treasury · ${v.you.income >= 0 ? '+' : ''}${v.you.income}/turn${v.you.negStreak ? ` · <b style="color:#e08585">running negative ${v.you.negStreak}/${RULES.collapseTurns} turns — at ${RULES.collapseTurns} your economy collapses</b>` : ''}</div>
+    </div>
+    <div class="grid2">
+      <div class="orbit-card">
+        <div class="who">Money in <span style="font-family:var(--mono);color:#3f9c78">+§${eco.income}</span></div>
+        <div>${incomeLines}</div>
+        <div class="detail">Finance hubs only pay while their region is connected to your capital. Cut-off regions earn nothing.</div>
+      </div>
+      <div class="orbit-card">
+        <div class="who">Money out <span style="font-family:var(--mono);color:#c25b46">−§${eco.upkeepTotal}</span></div>
+        <div>${upkeepLines}</div>
+        <div class="detail">Reclaim money by decommissioning structures (25% back, from the region panel) or disbanding units.</div>
+      </div>
+      ${v.you.builds.length ? `
+      <div class="orbit-card">
+        <div class="who">Being built</div>
+        <div>${buildRows}</div>
+      </div>` : ''}
+      ${unitRows ? `
+      <div class="orbit-card">
+        <div class="who">Units in the field</div>
+        <div>${unitRows}</div>
+      </div>` : ''}
+    </div>
+    <div>
+      <div class="pane-title" style="font-size:19px">Your regions</div>
+    </div>
+    <div class="grid3">${regionCards}</div>
+  </div>`;
 }
 
 function renderOrbit(v) {
@@ -775,9 +908,12 @@ function renderLog(v) {
     </div>`).join('');
   return `
   <div class="pane">
-    <div>
-      <div class="pane-title">Last turn's report</div>
-      <div class="pane-sub">Everything that happened when turn ${v.turn - 1} resolved, in the order it happened.</div>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap">
+      <div>
+        <div class="pane-title">Last turn's report</div>
+        <div class="pane-sub">Everything that happened when turn ${v.turn - 1} resolved, in the order it happened.</div>
+      </div>
+      <button class="cta" style="font-size:16px;padding:12px 28px" data-act="tab" data-arg="map">Back to the map →</button>
     </div>
     <div class="log-list">${items || '<div class="pane-sub">Nothing yet — finish your first turn.</div>'}</div>
   </div>`;
@@ -832,11 +968,30 @@ function renderSidebar(v) {
   const garrison = (mine || live) ? (r.garrison ?? 0) : r.intel ? `${r.intel.garrison}?` : 'unknown';
 
   const fighters = unitsAt(id).filter((u) => u.type !== 'bot');
-  const unitRows = fighters.length ? `
-    <div class="kv"><span>Units here</span><b>${fighters.map((u) => {
-      const who = u.owner === mySide() ? 'your' : 'their';
-      return u.type === 'swarm' ? `${who} swarm (${u.strength})` : `${who} worm`;
-    }).join(', ')}</b></div>` : '';
+  const unitRows = fighters.map((u) => {
+    const isMyUnit = u.owner === mySide();
+    const label = u.type === 'swarm' ? `swarm (strength ${u.strength})` : 'worm';
+    if (!isMyUnit) return `<div class="kv"><span>Their ${label} is here</span><b style="color:#c25b46">hostile</b></div>`;
+    const going = u.target && u.target !== u.region
+      ? `→ ${regionName(u.target)}, ${u.eta} turn${u.eta === 1 ? '' : 's'}`
+      : 'idle';
+    return `
+    <div class="kv" style="align-items:center">
+      <span>Your ${label}<br><span style="font-size:13px;color:${u.held ? '#c25b46' : 'var(--paper-muted)'}">${u.held ? 'held — the way in is cut off' : going}</span></span>
+      <span style="display:flex;gap:6px">
+        <button class="paper-btn" style="padding:4px 10px;font-size:12px" data-act="retarget" data-arg="${u.id}" ${locked() ? 'disabled' : ''}>Redirect</button>
+        <button class="paper-btn" style="padding:4px 10px;font-size:12px" data-act="disband" data-arg="${u.id}" ${locked() ? 'disabled' : ''}>Disband</button>
+      </span>
+    </div>`;
+  }).join('');
+
+  const starvedWarn = mine && r.starved > 0 && !r.connected ? `
+    <div class="warn-card">
+      <div class="t">Cut off for ${r.starved} turn${r.starved === 1 ? '' : 's'}</div>
+      <div class="d">No income, no reinforcements. ${r.starved > RULES.starveGrace
+    ? `It is decaying: structures lose ${RULES.starveNodeDamage} HP and a defender goes dark every turn.`
+    : `After ${RULES.starveGrace} turns, structures start losing ${RULES.starveNodeDamage} HP per turn and defenders go dark.`}</div>
+    </div>` : '';
 
   const alerts = v.you.alerts.filter((a) => a.region === id);
   const threatCards = alerts.map((a) => `
@@ -867,8 +1022,10 @@ function renderSidebar(v) {
         <div class="eyebrow">WHAT'S HERE</div>
         ${nodeRows}
         <div class="kv"><span>Defenders stationed</span><b>${garrison}</b></div>
+        ${(mine || live) ? `<div class="kv"><span>Structure slots</span><b>${nodes.length}/${RULES.maxNodesPerRegion}</b></div>` : ''}
         ${unitRows}
       </div>
+      ${starvedWarn}
       ${threatCards}
       ${buildRows}
       <div class="side-sec">
@@ -894,12 +1051,26 @@ function buildLabel(b) {
 }
 
 function actionBtn({ act, arg, label, detail, cost, time, color, disabled, why }) {
+  const shown = disabled && why ? `<span style="color:#b05c4c">${why}</span>` : detail;
   return `
   <button class="action-btn" data-act="${act}" ${arg ? `data-arg="${esc(arg)}"` : ''} ${disabled ? 'disabled' : ''} ${why ? `title="${esc(why)}"` : ''}>
     <div class="sw" style="background:${color}"></div>
-    <div class="mid"><div class="label">${label}</div><div class="detail">${detail}</div></div>
+    <div class="mid"><div class="label">${label}</div><div class="detail">${shown}</div></div>
     <div class="cost">${cost}<br>${time}</div>
   </button>`;
+}
+
+// What building each structure actually does for you — shown in the build menu.
+function nodeEffect(type) {
+  const c = RULES.costs;
+  switch (type) {
+    case 'FIN': return `+§${RULES.income.finance}/turn while connected to your capital · §${RULES.upkeep.node}/turn upkeep`;
+    case 'INF': return `Lets you train defenders here (§${c.bot} each) · adds +${RULES.combat.infBonus} defence while garrisoned`;
+    case 'ANL': return `Spots stealth worms here and next door · sweeps cost §${c.sweep} instead of §${c.sweepFar}`;
+    case 'OPS': return `Builds swarms (§${c.swarm}) and worms (§${c.worm}) — one at a time`;
+    case 'LNC': return `Launches satellites (§${c.satellite}) and satellite killers (§${c.asat}) — one at a time`;
+    default: return '';
+  }
 }
 
 function renderActions(v, r) {
@@ -959,9 +1130,31 @@ function renderActions(v, r) {
     }));
     if (S.ui.buildMenu && !cutOff && r.reconnecting === 0) {
       out.push(`<div class="sub-actions">${['FIN', 'INF', 'ANL', 'OPS', 'LNC'].map((type) => `
-        <button class="paper-btn" data-act="build-node" data-arg="${type}" ${left < c.node[type] ? 'disabled' : ''}>
-          ${NODE_META[type].label} · §${c.node[type]} · ${t.node[type]} turns
+        <button class="paper-btn" style="text-align:left" data-act="build-node" data-arg="${type}" ${left < c.node[type] ? 'disabled' : ''}>
+          <b>${NODE_META[type].label}</b> · §${c.node[type]} · ${t.node[type]} turns<br>
+          <span style="font-size:13px;color:var(--paper-muted);font-weight:400">${nodeEffect(type)}</span>
         </button>`).join('')}</div>`);
+    }
+    const removable = (r.nodes || []).filter((n) => n.type !== 'CAP');
+    if (removable.length || (r.garrison ?? 0) > 0) {
+      out.push(actionBtn({
+        act: 'decom-menu', label: 'Decommission something', detail: 'Get some money back and stop the upkeep',
+        cost: 'refunds', time: 'now', color: '#8d99ab',
+      }));
+      if (S.ui.decomMenu) {
+        const pendingDemo = (type) => S.ui.pending.filter((o) => o.kind === 'demolish' && o.region === id && o.type === type).length;
+        const items = [...new Set(removable.map((n) => n.type))].map((type) => {
+          const count = removable.filter((n) => n.type === type).length - pendingDemo(type);
+          return count > 0 ? `
+          <button class="paper-btn" data-act="demolish" data-arg="${type}">
+            Remove ${NODE_META[type].label.toLowerCase()} · get §${Math.floor(c.node[type] * RULES.demolishRefund)} back
+          </button>` : '';
+        }).join('');
+        const pendingBotDisband = S.ui.pending.filter((o) => o.kind === 'disband_bots' && o.region === id).reduce((s, o) => s + o.count, 0);
+        const botsLeft = (r.garrison ?? 0) - pendingBotDisband;
+        out.push(`<div class="sub-actions">${items}${botsLeft > 0
+          ? `<button class="paper-btn" data-act="disband-bot">Disband a defender · saves §${RULES.upkeep.bot}/turn</button>` : ''}</div>`);
+      }
     }
   } else {
     const enemy = isEnemy(r);
@@ -974,19 +1167,33 @@ function renderActions(v, r) {
         why: !conn ? 'Not adjacent to your connected network' : '',
       }));
     }
+    const opsChoices = idleOpsRegions();
+    const opsWhy = opsChoices.length === 0
+      ? (facilityFree('OPS') ? '' : 'Every cyber ops centre is busy — build another, or wait')
+      : '';
+    const attackSub = (kind) => `<div class="sub-actions">${opsChoices.map((ops) => {
+      const dist = travelEta(ops, id);
+      const buildT = kind === 'swarm' ? t.swarm : t.worm;
+      return `
+      <button class="paper-btn" style="text-align:left" data-act="attack-from" data-arg="${ops}">
+        <b>From ${esc(regionName(ops))}</b> · ${buildT} turns to build, then ${dist} turn${dist === 1 ? '' : 's'} of travel
+      </button>`;
+    }).join('')}</div>`;
     out.push(actionBtn({
       act: 'swarm', label: 'Send a swarm here', detail: 'Cheap and numerous. Travels one region per turn and can be seen coming',
       cost: `§${c.swarm}`, time: `${t.swarm} turns to build`, color: '#d8624f',
-      disabled: !facilityFree('OPS') || left < c.swarm,
-      why: !facilityFree('OPS') ? 'Every cyber ops centre is busy (or you have none)' : '',
+      disabled: !opsChoices.length || left < c.swarm,
+      why: opsWhy || (opsChoices.length && left < c.swarm ? 'Not enough funding left' : opsWhy),
     }));
+    if (S.ui.attackMenu === 'swarm' && opsChoices.length > 1) out.push(attackSub('swarm'));
     if (enemy) {
       out.push(actionBtn({
         act: 'worm', label: 'Send a worm here', detail: 'Slow and expensive, but invisible unless they have eyes on the route',
         cost: `§${c.worm}`, time: `${t.worm} turns to build`, color: '#d8624f',
-        disabled: !facilityFree('OPS') || left < c.worm,
-        why: !facilityFree('OPS') ? 'Every cyber ops centre is busy (or you have none)' : '',
+        disabled: !opsChoices.length || left < c.worm,
+        why: opsWhy || (opsChoices.length && left < c.worm ? 'Not enough funding left' : opsWhy),
       }));
+      if (S.ui.attackMenu === 'worm' && opsChoices.length > 1) out.push(attackSub('worm'));
     }
     out.push(actionBtn({
       act: 'satellite', label: 'Put a satellite overhead', detail: enemy ? 'See what is really in here, and spot worms passing through' : 'Watch the crossroads before they use it',
@@ -1018,12 +1225,14 @@ function renderOrderbar(v) {
       <div class="chips">${chips || `<div class="none">${isLocked ? 'No orders this turn.' : 'No orders yet — pick a region on the map and choose an action.'}</div>`}</div>
     </div>
     <div class="right">
-      <div class="spendline">Spending this turn <b class="${over ? 'over' : ''}">§${spend}</b> of §${v.you.funding}</div>
+      <div class="spendline">Orders cost <b class="${over ? 'over' : ''}">§${spend}</b> · you'll have <b class="${over ? 'over' : ''}">§${v.you.funding - spend}</b> left</div>
       ${v.winner
     ? `<button class="lock-btn locked" data-act="show-result">Match over — view result</button>`
     : isLocked
       ? `<button class="lock-btn locked" disabled>Locked — waiting for ${esc(oppName())}</button>`
-      : `<button class="lock-btn" data-act="lock" ${over ? 'disabled' : ''}>Lock in orders</button>`}
+      : S.ui.lockConfirm
+        ? `<button class="lock-btn" style="background:#a3702a" data-act="lock" ${over ? 'disabled' : ''}>You haven't checked the map — lock anyway?</button>`
+        : `<button class="lock-btn" data-act="lock" ${over ? 'disabled' : ''}>Lock in orders</button>`}
     </div>
   </div>`;
 }
@@ -1053,7 +1262,10 @@ function renderResolve(v) {
         </div>`;
   }).join('')}
       </div>
-      <div class="foot"><button class="paper-btn primary" data-act="see-report" style="font-size:17px;padding:13px 32px">See what happened</button></div>
+      <div class="foot" style="gap:10px">
+        <button class="paper-btn" data-act="see-report" style="font-size:16px;padding:12px 24px">Read the full report</button>
+        <button class="paper-btn primary" data-act="to-map" style="font-size:17px;padding:13px 32px">To the map — plan turn ${v.turn}</button>
+      </div>
     </div>
   </div>`;
 }
@@ -1125,13 +1337,25 @@ $app.addEventListener('click', (ev) => {
       navigator.clipboard?.writeText(`${HERE}?code=${S.sync.match.code}`);
       el.textContent = 'Copied!';
       break;
-    case 'tab': S.ui.tab = arg; S.ui.resolve = null; render(); break;
+    case 'tab':
+      S.ui.tab = arg;
+      S.ui.resolve = null;
+      if (arg === 'map') { S.ui.sawMap = true; S.ui.lockConfirm = false; }
+      render();
+      break;
+    case 'to-map':
+      S.ui.resolve = null;
+      S.ui.tab = 'map';
+      S.ui.sawMap = true;
+      S.ui.lockConfirm = false;
+      render();
+      break;
     case 'hex': {
       if (S.ui.pick) {
         const pick = S.ui.pick;
         S.ui.pick = null;
-        if (pick.type === 'sat') addOrder({ kind: 'build_satellite', target: arg });
-        else if (pick.type === 'moveSat') addOrder({ kind: 'move_satellite', sat: pick.sat, target: arg });
+        if (pick.type === 'moveSat') addOrder({ kind: 'move_satellite', sat: pick.sat, target: arg });
+        else if (pick.type === 'retarget') addOrder({ kind: 'retarget', unit: pick.unit, target: arg, unitType: pick.unitType });
         S.ui.tab = 'map';
         render();
         return;
@@ -1139,11 +1363,15 @@ $app.addEventListener('click', (ev) => {
       S.ui.selected = arg;
       S.ui.buildMenu = false;
       S.ui.reinforceMenu = false;
+      S.ui.decomMenu = false;
+      S.ui.attackMenu = null;
       S.ui.tab = 'map';
+      S.ui.sawMap = true;
+      S.ui.lockConfirm = false;
       render();
       break;
     }
-    case 'focus-threat': if (arg) { S.ui.selected = arg; S.ui.tab = 'map'; render(); } break;
+    case 'focus-threat': if (arg) { S.ui.selected = arg; S.ui.tab = 'map'; S.ui.sawMap = true; render(); } break;
     case 'pick-cancel': S.ui.pick = null; render(); break;
 
     // region actions
@@ -1153,11 +1381,38 @@ $app.addEventListener('click', (ev) => {
     case 'isolate': addOrder({ kind: 'isolate', region: sel() }); break;
     case 'reconnect': addOrder({ kind: 'reconnect', region: sel() }); break;
     case 'sweep': addOrder({ kind: 'sweep', region: sel() }); break;
-    case 'build-menu': S.ui.buildMenu = !S.ui.buildMenu; render(); break;
+    case 'build-menu': S.ui.buildMenu = !S.ui.buildMenu; S.ui.decomMenu = false; render(); break;
     case 'build-node': addOrder({ kind: 'build_node', region: sel(), type: arg }); break;
+    case 'decom-menu': S.ui.decomMenu = !S.ui.decomMenu; S.ui.buildMenu = false; render(); break;
+    case 'demolish': addOrder({ kind: 'demolish', region: sel(), type: arg }); break;
+    case 'disband-bot': addOrder({ kind: 'disband_bots', region: sel(), count: 1 }); break;
+    case 'disband': {
+      const u = view().units.find((x) => x.id === Number(arg));
+      if (u && !S.ui.pending.some((o) => o.kind === 'disband' && o.unit === u.id)) {
+        addOrder({ kind: 'disband', unit: u.id, unitType: u.type });
+      }
+      break;
+    }
+    case 'retarget': {
+      const u = view().units.find((x) => x.id === Number(arg));
+      if (u) { S.ui.pick = { type: 'retarget', unit: u.id, unitType: u.type }; S.ui.tab = 'map'; render(); }
+      break;
+    }
     case 'claim': addOrder({ kind: 'claim', region: sel() }); break;
-    case 'swarm': addOrder({ kind: 'build_swarm', target: sel() }); break;
-    case 'worm': addOrder({ kind: 'build_worm', target: sel() }); break;
+    case 'swarm':
+    case 'worm': {
+      const kind = act === 'swarm' ? 'build_swarm' : 'build_worm';
+      const ops = idleOpsRegions();
+      if (!ops.length) break;
+      if (ops.length === 1) addOrder({ kind, target: sel(), facility: ops[0] });
+      else { S.ui.attackMenu = S.ui.attackMenu === act ? null : act; render(); }
+      break;
+    }
+    case 'attack-from': {
+      const kind = S.ui.attackMenu === 'worm' ? 'build_worm' : 'build_swarm';
+      addOrder({ kind, target: sel(), facility: arg });
+      break;
+    }
     case 'satellite': addOrder({ kind: 'build_satellite', target: sel() }); break;
     case 'movesat': S.ui.pick = { type: 'moveSat', sat: Number(arg) }; S.ui.tab = 'map'; render(); break;
     case 'asat': addOrder({ kind: 'build_asat', targetSat: Number(arg) }); break;
@@ -1169,7 +1424,17 @@ $app.addEventListener('click', (ev) => {
       break;
     }
     case 'unqueue': S.ui.pending.splice(Number(arg), 1); render(); break;
-    case 'lock': lockIn(); break;
+    case 'lock':
+      // Nudge players who lock straight from the report without re-checking
+      // the map — a second click confirms.
+      if (!S.ui.sawMap && !S.ui.lockConfirm) {
+        S.ui.lockConfirm = true;
+        render();
+        break;
+      }
+      S.ui.lockConfirm = false;
+      lockIn();
+      break;
     case 'see-report': S.ui.resolve = null; S.ui.tab = 'log'; render(); break;
     case 'see-final': S.ui.hideOver = true; S.ui.resolve = null; S.ui.tab = 'log'; render(); break;
     case 'show-result': S.ui.hideOver = false; render(); break;

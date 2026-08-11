@@ -240,6 +240,70 @@ test('economic collapse ends the game', () => {
   assert.match(state.winReason, /collapse/i);
 });
 
+test('decommission refunds 25% and stops the upkeep', () => {
+  let state = createMatch();
+  const before = state.players.A.funding;
+  ({ state } = turn(state, [{ kind: 'demolish', region: 'ellwick', type: 'FIN' }]));
+  assert.equal(state.regions.ellwick.nodes.filter((n) => n.type === 'FIN').length, 0);
+  const refund = Math.floor(RULES.costs.node.FIN * RULES.demolishRefund);
+  assert.equal(state.players.A.funding, before + refund + state.players.A.income);
+  const cap = validateOrders(state, 'A', [{ kind: 'demolish', region: 'aldermoor', type: 'CAP' }]);
+  assert.equal(cap.accepted.length, 0, 'capitals cannot be decommissioned');
+});
+
+test('disbanding units and defenders removes them', () => {
+  let state = createMatch();
+  state.units.push({ id: state.nextId++, owner: 'A', type: 'swarm', region: 'vellmar', target: 'ostrey', path: ['ilsmere', 'ostrey'], strength: 6 });
+  const swarmId = state.nextId - 1;
+  const botsBefore = state.units.filter((u) => u.type === 'bot' && u.owner === 'A' && u.region === 'aldermoor').length;
+  ({ state } = turn(state, [
+    { kind: 'disband', unit: swarmId },
+    { kind: 'disband_bots', region: 'aldermoor', count: 2 },
+  ]));
+  assert.equal(state.units.filter((u) => u.type === 'swarm').length, 0);
+  assert.equal(
+    state.units.filter((u) => u.type === 'bot' && u.owner === 'A' && u.region === 'aldermoor').length,
+    botsBefore - 2
+  );
+});
+
+test('retarget reroutes a unit mid-journey', () => {
+  let state = createMatch();
+  state.units.push({ id: state.nextId++, owner: 'A', type: 'swarm', region: 'norvane', target: 'quarrow', path: ['ostrey', 'quarrow'], strength: 6 });
+  const id = state.nextId - 1;
+  ({ state } = turn(state, [{ kind: 'retarget', unit: id, target: 'marnow' }]));
+  const u = state.units.find((x) => x.id === id);
+  assert.equal(u.target, 'marnow');
+  assert.equal(u.region, 'marnow', 'took its first step on the new route the same turn');
+});
+
+test('swarm builds honor a chosen ops centre and reject busy ones', () => {
+  const state = createMatch();
+  const ok = validateOrders(state, 'A', [{ kind: 'build_swarm', target: 'ostrey', facility: 'dunmere' }]);
+  assert.equal(ok.accepted.length, 1);
+  assert.equal(ok.accepted[0].facility, 'dunmere');
+  const bad = validateOrders(state, 'A', [{ kind: 'build_swarm', target: 'ostrey', facility: 'corvale' }]);
+  assert.equal(bad.accepted.length, 0, 'corvale has no ops centre');
+  const both = validateOrders(state, 'A', [
+    { kind: 'build_swarm', target: 'ostrey', facility: 'dunmere' },
+    { kind: 'build_worm', target: 'ostrey', facility: 'dunmere' },
+  ]);
+  assert.equal(both.accepted.length, 1, 'one ops centre builds one thing at a time');
+});
+
+test('economy breakdown matches the resolved net income', () => {
+  let state = createMatch();
+  ({ state } = resolveTurn(state, { A: [], B: [] }));
+  assert.ok(Number.isInteger(state.players.A.income));
+  // The view exposes the same breakdown the resolver used.
+  return import('../shared/view.js').then(({ buildView }) => {
+    const v = buildView(state, 'A');
+    assert.equal(v.you.economy.net, state.players.A.income);
+    assert.ok(v.you.economy.income > 0);
+    assert.ok(v.you.economy.finance.length >= 3, 'itemized finance regions');
+  });
+});
+
 test('determinism: same state + same orders → identical result', () => {
   const state = createMatch();
   const orders = {

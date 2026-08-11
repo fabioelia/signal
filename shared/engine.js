@@ -83,6 +83,7 @@ export function createMatch(names = { A: 'Player A', B: 'Player B' }) {
     const v = computeVision(state, side);
     state.players[side].sight = [...v.sight];
     state.players[side].detect = [...v.detect];
+    state.players[side].income = economyOf(state, side).net;
   }
   refreshIntel(state);
   refreshAlerts(state);
@@ -155,6 +156,51 @@ export function computeVision(state, side) {
   }
   for (const sat of state.players[side].satellites) cover(sat.region);
   return { sight, detect };
+}
+
+// Itemized income/upkeep for one player, used by the resolver, the initial
+// state, and the per-player view (the client's Funds tab renders it as-is).
+export function economyOf(state, side) {
+  const player = state.players[side];
+  const conn = connectedSet(state, side);
+  const finance = [];
+  const capitalIncome =
+    conn.has(player.capital) && capitalNode(state, side) ? RULES.income.capital : 0;
+  let income = capitalIncome;
+  let nodeCount = 0;
+  for (const id of conn) {
+    const region = state.regions[id];
+    const fin = nodesOf(region, 'FIN').length;
+    if (fin) finance.push({ region: id, count: fin, amount: fin * RULES.income.finance });
+    nodeCount += region.nodes.filter((n) => n.type !== 'CAP').length;
+  }
+  income += finance.reduce((s, f) => s + f.amount, 0);
+  let bots = 0;
+  let swarms = 0;
+  let worms = 0;
+  for (const u of state.units) {
+    if (u.owner !== side) continue;
+    if (u.type === 'bot') bots += conn.has(u.region) ? 1 : 0;
+    else if (u.type === 'swarm') swarms += 1;
+    else worms += 1;
+  }
+  const upkeep = {
+    nodes: nodeCount * RULES.upkeep.node,
+    bots: bots * RULES.upkeep.bot,
+    swarms: swarms * RULES.upkeep.swarm,
+    worms: worms * RULES.upkeep.worm,
+    satellites: player.satellites.length * RULES.upkeep.satellite,
+  };
+  const upkeepTotal = upkeep.nodes + upkeep.bots + upkeep.swarms + upkeep.worms + upkeep.satellites;
+  return {
+    capitalIncome,
+    finance,
+    income,
+    upkeep,
+    upkeepTotal,
+    net: income - upkeepTotal,
+    counts: { nodes: nodeCount, bots, swarms, worms, satellites: player.satellites.length },
+  };
 }
 
 function analystNearby(state, side, regionId) {
@@ -306,7 +352,18 @@ export function validateOrders(state, side, orders) {
         const target = state.regions[o.target];
         if (!target) { reject(o, 'pick a target region'); continue; }
         if (target.owner === side) { reject(o, 'that region is already yours'); continue; }
-        const facility = pickFacility(state, side, 'OPS', o.target, extraOps);
+        let facility = null;
+        if (o.facility) {
+          // The player chose which ops centre builds it.
+          const fr = state.regions[o.facility];
+          const capacity = fr && fr.owner === side ? nodesOf(fr, 'OPS').length : 0;
+          const used = (facilityLoad(state, side, 'OPS')[o.facility] || 0) + (extraOps[o.facility] || 0);
+          if (!capacity) { reject(o, 'no cyber ops centre there'); continue; }
+          if (used >= capacity) { reject(o, 'that ops centre is already busy'); continue; }
+          facility = o.facility;
+        } else {
+          facility = pickFacility(state, side, 'OPS', o.target, extraOps);
+        }
         if (!facility) { reject(o, 'every cyber ops centre is busy (or you have none)'); continue; }
         if (o.route) {
           let prev = facility;
@@ -356,6 +413,40 @@ export function validateOrders(state, side, orders) {
         o.cost = 0;
         break;
       }
+      case 'demolish': {
+        if (!region || region.owner !== side) { reject(o, 'not your region'); continue; }
+        if (o.type === 'CAP' || !RULES.costs.node[o.type]) { reject(o, 'that cannot be removed'); continue; }
+        const have = nodesOf(region, o.type).length;
+        const already = accepted.filter((a) => a.kind === 'demolish' && a.region === o.region && a.type === o.type).length;
+        if (already >= have) { reject(o, 'nothing left to remove'); continue; }
+        o.cost = 0;
+        break;
+      }
+      case 'disband': {
+        const u = state.units.find((x) => x.id === o.unit && x.owner === side && x.type !== 'bot');
+        if (!u) { reject(o, 'no such unit'); continue; }
+        if (accepted.some((a) => a.kind === 'disband' && a.unit === o.unit)) { reject(o, 'already disbanding'); continue; }
+        o.cost = 0;
+        break;
+      }
+      case 'disband_bots': {
+        if (!region || region.owner !== side) { reject(o, 'not your region'); continue; }
+        const already = accepted
+          .filter((a) => a.kind === 'disband_bots' && a.region === o.region)
+          .reduce((s, a) => s + a.count, 0);
+        const avail = botsIn(state, o.region, side).length - (movesFrom[o.region] || 0) - already;
+        if (avail < 1) { reject(o, 'no defenders to disband there'); continue; }
+        o.count = Math.max(1, Math.min(o.count || 1, avail));
+        o.cost = 0;
+        break;
+      }
+      case 'retarget': {
+        const u = state.units.find((x) => x.id === o.unit && x.owner === side && (x.type === 'swarm' || x.type === 'worm'));
+        if (!u) { reject(o, 'no such unit'); continue; }
+        if (!o.target || !state.regions[o.target]) { reject(o, 'pick a destination'); continue; }
+        o.cost = 0;
+        break;
+      }
       default:
         reject(o, 'unknown order');
         continue;
@@ -386,6 +477,7 @@ export function resolveTurn(prevState, orders) {
   const isolations = [];
   const reconnections = [];
   const botMoves = [];
+  const retargets = [];
   for (const side of SIDES) {
     const player = state.players[side];
     for (const o of bySide[side]) {
@@ -430,6 +522,34 @@ export function resolveTurn(prevState, orders) {
           }
           break;
         }
+        case 'demolish': {
+          const region = state.regions[o.region];
+          if (region.owner !== side) break;
+          const i = region.nodes.findIndex((n) => n.type === o.type && n.type !== 'CAP');
+          if (i < 0) break;
+          region.nodes.splice(i, 1);
+          const refund = Math.floor((RULES.costs.node[o.type] || 0) * RULES.demolishRefund);
+          player.funding += refund;
+          log(side, 5, `Decommissioned a ${o.type} at ${regionName(o.region)}`, `Recovered §${refund}, and its upkeep stops now.`, '#8d99ab');
+          break;
+        }
+        case 'disband': {
+          const u = state.units.find((x) => x.id === o.unit && x.owner === side);
+          if (!u) break;
+          state.units = state.units.filter((x) => x.id !== u.id);
+          log(side, 5, `Disbanded your ${u.type}`, 'Its upkeep stops now.', '#8d99ab');
+          break;
+        }
+        case 'disband_bots': {
+          const bots = botsIn(state, o.region, side).slice(0, o.count || 1);
+          const ids = new Set(bots.map((b) => b.id));
+          state.units = state.units.filter((x) => !ids.has(x.id));
+          if (bots.length) {
+            log(side, 5, `Disbanded ${bots.length} defender${bots.length === 1 ? '' : 's'} at ${regionName(o.region)}`, 'Their upkeep stops now.', '#8d99ab');
+          }
+          break;
+        }
+        case 'retarget': retargets.push([side, o]); break;
       }
     }
   }
@@ -468,6 +588,15 @@ export function resolveTurn(prevState, orders) {
   }
 
   // -- Step 2: movement -----------------------------------------------------
+  // New routes first: a redirected unit takes its first step toward the new
+  // destination this same turn.
+  for (const [side, o] of retargets) {
+    const u = state.units.find((x) => x.id === o.unit && x.owner === side && (x.type === 'swarm' || x.type === 'worm'));
+    if (!u) continue;
+    u.target = o.target;
+    u.path = u.region === o.target ? [] : shortestPath(u.region, o.target) || [];
+    log(side, 2, `Your ${u.type} has new orders`, `Now heading for ${regionName(o.target)} — ${u.path.length} turn${u.path.length === 1 ? '' : 's'} of travel.`, '#4a7fe0');
+  }
   for (const [side, o] of botMoves) {
     const from = state.regions[o.from];
     const to = state.regions[o.to];
@@ -700,24 +829,10 @@ export function resolveTurn(prevState, orders) {
         }
       }
     }
-    let income = 0;
-    if (conn.has(player.capital) && capitalNode(state, side)) income += RULES.income.capital;
-    for (const id of conn) {
-      income += nodesOf(state.regions[id], 'FIN').length * RULES.income.finance;
-    }
-    let upkeep = player.satellites.length * RULES.upkeep.satellite;
-    for (const id of conn) {
-      upkeep += state.regions[id].nodes.filter((n) => n.type !== 'CAP').length * RULES.upkeep.node;
-    }
-    for (const u of state.units) {
-      if (u.owner !== side) continue;
-      if (u.type === 'bot') {
-        if (conn.has(u.region)) upkeep += RULES.upkeep.bot;
-      } else {
-        upkeep += RULES.upkeep[u.type];
-      }
-    }
-    const net = income - upkeep;
+    const eco = economyOf(state, side);
+    const income = eco.income;
+    const upkeep = eco.upkeepTotal;
+    const net = eco.net;
     player.income = net;
     player.funding = Math.max(0, player.funding + net);
     player.negStreak = net < 0 ? player.negStreak + 1 : 0;

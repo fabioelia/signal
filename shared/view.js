@@ -4,7 +4,7 @@
 
 import { REGIONS, NEIGHBORS } from './map.js';
 import { RULES } from './constants.js';
-import { enemyOf, botsIn, connectedSet } from './engine.js';
+import { enemyOf, botsIn, connectedSet, economyOf } from './engine.js';
 
 export function buildView(state, side) {
   const player = state.players[side];
@@ -53,6 +53,11 @@ export function buildView(state, side) {
       if (u.type === 'worm' && !u.detectedBy?.[side]) continue; // stealth
       if (u.type !== 'worm' && !sight.has(u.region)) continue;
     }
+    let held = false;
+    if (mine && u.path?.length) {
+      const next = state.regions[u.path[0]];
+      held = next.isolated || (next.reconnecting > 0 && next.owner === u.owner);
+    }
     units.push({
       id: u.id,
       owner: u.owner,
@@ -62,6 +67,7 @@ export function buildView(state, side) {
       target: mine ? u.target ?? null : (u.type === 'worm' || sight.has(u.region) ? u.target ?? null : null),
       eta: mine || u.type === 'worm' || sight.has(u.region) ? u.path?.length ?? 0 : null,
       detected: u.type === 'worm' ? !!u.detectedBy?.[enemyOf(u.owner)] : null,
+      held: mine ? held : null,
     });
   }
 
@@ -101,6 +107,7 @@ export function buildView(state, side) {
       sight: [...player.sight],
       detect: [...player.detect],
       alerts: player.alerts.map((a) => ({ ...a })),
+      economy: economyOf(state, side),
     },
     opponent: {
       name: enemyPlayer.name,
