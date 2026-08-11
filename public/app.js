@@ -124,6 +124,7 @@ function handleMessage(msg) {
       S.sync = msg;
       if (msg.resolved && msg.view && msg.view.turn > prevTurn && prevTurn > 0) {
         S.ui.pending = [];
+        requeueStanding();
         S.ui.autoLocked = false;
         S.ui.sawMap = S.ui.tab === 'map';
         S.ui.lockConfirm = false;
@@ -225,6 +226,7 @@ function applyLocalSync(side) {
   S.sync = seat.sync;
   if (seat.pendingResolve) {
     S.ui.pending = [];
+    requeueStanding();
     S.ui.sawMap = S.ui.tab === 'map';
     S.ui.lockConfirm = false;
     S.ui.resolve = seat.pendingResolve;
@@ -369,7 +371,7 @@ function orderChip(o) {
   switch (o.kind) {
     case 'claim': return { label: `Claim ${regionName(o.region)}`, meta: `${t.claim} turns · §${cost}`, color: '#4a7fe0' };
     case 'build_node': return { label: `Build ${NODE_META[o.type].label.toLowerCase()} in ${regionName(o.region)}`, meta: `${t.node[o.type]} turns · §${cost}`, color: NODE_META[o.type].color };
-    case 'train_bots': return { label: `Train ${o.count} defender${o.count === 1 ? '' : 's'} at ${regionName(o.region)}`, meta: `1 turn · §${cost}`, color: '#4a7fe0' };
+    case 'train_bots': return { label: `${o.standing ? '↻ ' : ''}Train ${o.count} defender${o.count === 1 ? '' : 's'} at ${regionName(o.region)}`, meta: o.standing ? `every turn · §${cost}/turn` : `1 turn · §${cost}`, color: '#4a7fe0' };
     case 'move_bots': return { label: `Reinforce ${regionName(o.to)}`, meta: `${o.count} from ${regionName(o.from)} · arrives next turn`, color: '#4a7fe0' };
     case 'isolate': return { label: `Cut off ${regionName(o.region)}`, meta: 'Reconnect takes 2 turns', color: '#e8b53f' };
     case 'reconnect': return { label: `Reconnect ${regionName(o.region)}`, meta: `${RULES.reconnectTurns} turns · vulnerable meanwhile`, color: '#e8b53f' };
@@ -400,17 +402,29 @@ function addOrder(o) {
       return;
     }
   }
+  // Menus stay open on purpose — playtesters kept clicking "+1" and having
+  // the menu collapse under them. Selecting a different region closes them.
   S.ui.pending.push(o);
-  S.ui.buildMenu = false;
-  S.ui.reinforceMenu = false;
-  S.ui.decomMenu = false;
-  S.ui.attackMenu = null;
   render();
 }
 
 function lockIn() {
   if (!planning() || locked()) return;
-  send({ t: 'lock', orders: S.ui.pending.map(({ maxCount, label, refund, unitType, estCost, ...o }) => o) });
+  send({ t: 'lock', orders: S.ui.pending.map(({ maxCount, label, refund, unitType, estCost, standing, ...o }) => o) });
+}
+
+// Standing orders (auto-train): re-queued at the start of every planning
+// phase until stopped. Scoped per seat so hot-seat players don't inherit
+// each other's automation.
+function standingList() {
+  if (local) return (local.seats[S.localSeat].standing ??= []);
+  return (S.standingOnline ??= []);
+}
+
+function requeueStanding() {
+  for (const s of standingList()) {
+    S.ui.pending.push({ ...s, standing: true });
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -717,7 +731,7 @@ function renderMap(v) {
   const topAlert = v.you.alerts[0];
   return `
   <div class="mapwrap">
-    <div class="mapscale" id="mapscale">${hexes}</div>
+    <div class="mapscale" id="mapscale">${hexes}${routeLines(v)}</div>
     <div class="legend">
       <div class="item"><div class="sw" style="background:#2f4f8f;border:1px solid #6d9bf0"></div>Yours</div>
       <div class="item"><div class="sw" style="background:#6b4326;border:1px solid #e0a06f"></div>${esc(oppName())}</div>
@@ -1141,14 +1155,61 @@ function facilityStatusRows(v, id, r) {
   }).join('');
 }
 
-// Travel time for defenders: through your own connected network only.
-function botEta(from, to) {
+// Route for defenders: through your own connected network only.
+function botPath(from, to) {
   const blocked = (rid) => {
     const rr = region(rid);
     return !rr || rr.owner !== mySide() || rr.isolated || rr.reconnecting > 0;
   };
-  const path = shortestPath(from, to, blocked);
+  return shortestPath(from, to, blocked);
+}
+
+function botEta(from, to) {
+  const path = botPath(from, to);
   return path ? path.length : null;
+}
+
+// Dashed route lines on the map: where your units are going, where your
+// queued/under-construction attacks will travel, and (estimated) where
+// visible incoming threats are headed.
+function routeLines(v) {
+  const center = (id) => {
+    const r = v.regions[id];
+    return [r.x + 66, r.y + 75];
+  };
+  const lines = [];
+  const poly = (ids, color, opacity, dash, width = 3) => {
+    if (!ids || ids.length < 2) return;
+    const pts = ids.map((id) => center(id).join(',')).join(' ');
+    lines.push(`<polyline points="${pts}" fill="none" stroke="${color}" stroke-opacity="${opacity}" stroke-width="${width}" stroke-dasharray="${dash}" stroke-linecap="round"/>`);
+    const [tx, ty] = center(ids[ids.length - 1]);
+    lines.push(`<circle cx="${tx}" cy="${ty}" r="8" fill="none" stroke="${color}" stroke-opacity="${opacity}" stroke-width="2.5"/>`);
+  };
+  const unitColor = (t) => (t === 'worm' ? '#b48ae0' : t === 'bot' ? '#6d9bf0' : '#e0705c');
+  for (const u of v.units) {
+    if (u.owner === mySide()) {
+      if (u.path?.length) poly([u.region, ...u.path], unitColor(u.type), 0.85, '3 9');
+    } else if ((u.type === 'swarm' || u.type === 'worm') && u.target && u.target !== u.region) {
+      // Their exact route is their business — draw the likely one.
+      poly([u.region, ...(shortestPath(u.region, u.target) || [])], '#e0803f', 0.55, '7 7');
+    }
+  }
+  // Attacks still in the build queue at a red team den.
+  for (const b of v.you.builds) {
+    if (b.kind === 'swarm' || b.kind === 'worm') {
+      poly([b.facility, ...(shortestPath(b.facility, b.target) || [])], unitColor(b.kind), 0.3, '2 8', 2.5);
+    }
+  }
+  // Orders queued this turn but not locked yet.
+  for (const o of S.ui.pending) {
+    if (o.kind === 'build_swarm' || o.kind === 'build_worm') {
+      poly([o.facility, ...(shortestPath(o.facility, o.target) || [])], unitColor(o.kind.slice(6)), 0.3, '2 8', 2.5);
+    } else if (o.kind === 'move_bots') {
+      const p = botPath(o.from, o.to);
+      if (p) poly([o.from, ...p], '#6d9bf0', 0.35, '2 8', 2.5);
+    }
+  }
+  return `<svg width="880" height="545" viewBox="0 0 880 545" style="position:absolute;left:0;top:0;pointer-events:none;overflow:visible">${lines.join('')}</svg>`;
 }
 
 function buildLabel(b) {
@@ -1219,11 +1280,21 @@ function renderActions(v, r) {
         return `<button class="paper-btn" data-act="reinforce" data-arg="${n.id}" ${avail < 1 ? 'disabled' : ''}>+1 from ${esc(n.name)} (${avail} available) · ${n.eta} turn${n.eta === 1 ? '' : 's'}</button>`;
       }).join('')}</div>`);
     }
-    if ((r.nodes || []).some((n) => n.type === 'INF')) {
+    const hasInf = (r.nodes || []).some((n) => n.type === 'INF');
+    const standing = standingList().some((s) => s.kind === 'train_bots' && s.region === id);
+    out.push(actionBtn({
+      act: 'train', label: 'Train a defender', detail: 'The garrison here builds one infantry bot',
+      cost: `§${c.bot}`, time: '1 turn', color: '#4a7fe0',
+      disabled: cutOff || r.reconnecting > 0 || !hasInf || left < c.bot,
+      why: !hasInf ? 'Needs a defender garrison here — build one first' : left < c.bot ? 'Not enough funding left' : '',
+    }));
+    if (hasInf) {
       out.push(actionBtn({
-        act: 'train', label: 'Train a defender', detail: 'The garrison here builds one infantry bot',
-        cost: `§${c.bot}`, time: '1 turn', color: '#4a7fe0',
-        disabled: cutOff || r.reconnecting > 0 || left < c.bot,
+        act: 'train-standing',
+        label: standing ? 'Stop auto-training' : 'Auto-train every turn',
+        detail: standing ? 'This region queues a defender each turn — click to stop' : `Queues one defender here automatically at the start of every turn`,
+        cost: standing ? '' : `§${c.bot}/turn`, time: '↻', color: '#4a7fe0',
+        disabled: !standing && (cutOff || r.reconnecting > 0),
       }));
     }
     out.push(actionBtn({
@@ -1533,6 +1604,19 @@ $app.addEventListener('click', (ev) => {
     case 'reinforce-menu': S.ui.reinforceMenu = !S.ui.reinforceMenu; render(); break;
     case 'reinforce': addOrder({ kind: 'move_bots', from: arg, to: sel(), count: 1, maxCount: region(arg)?.garrison ?? 1 }); break;
     case 'train': addOrder({ kind: 'train_bots', region: sel(), count: 1 }); break;
+    case 'train-standing': {
+      const list = standingList();
+      const i = list.findIndex((s) => s.kind === 'train_bots' && s.region === sel());
+      if (i >= 0) {
+        list.splice(i, 1);
+        S.ui.pending = S.ui.pending.filter((o) => !(o.standing && o.kind === 'train_bots' && o.region === sel()));
+      } else {
+        list.push({ kind: 'train_bots', region: sel(), count: 1 });
+        S.ui.pending.push({ kind: 'train_bots', region: sel(), count: 1, standing: true });
+      }
+      render();
+      break;
+    }
     case 'isolate': addOrder({ kind: 'isolate', region: sel() }); break;
     case 'reconnect': addOrder({ kind: 'reconnect', region: sel() }); break;
     case 'sweep': addOrder({ kind: 'sweep', region: sel() }); break;
@@ -1584,7 +1668,17 @@ $app.addEventListener('click', (ev) => {
       }
       break;
     }
-    case 'unqueue': S.ui.pending.splice(Number(arg), 1); render(); break;
+    case 'unqueue': {
+      const [removed] = S.ui.pending.splice(Number(arg), 1);
+      if (removed?.standing) {
+        // Removing a ↻ chip also stops the automation behind it.
+        const list = standingList();
+        const i = list.findIndex((s) => s.kind === removed.kind && s.region === removed.region);
+        if (i >= 0) list.splice(i, 1);
+      }
+      render();
+      break;
+    }
     case 'lock':
       // Nudge players who lock straight from the report without re-checking
       // the map — a second click confirms.

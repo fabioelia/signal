@@ -172,6 +172,18 @@ overlay, and used as `step` numbers in the report):
 
 ## Changelog
 
+**v0.4.0** — third playtest feedback round:
+- **Route lines on the map**: dashed lines show where your units are
+  heading, the routes your queued/under-construction attacks will take, and
+  the estimated path of visible incoming threats.
+- **Auto-train**: garrisoned regions get an "Auto-train every turn" toggle
+  (↻) that queues a defender automatically each planning phase until
+  stopped.
+- *Bug fix:* action submenus (reinforce sources, build list, origin picker)
+  no longer collapse after every click — you can hammer "+1" repeatedly.
+- "Train a defender" is always visible, with an inline reason when there's
+  no garrison to do the training.
+
 **v0.3.0** — second playtest feedback round:
 - *Bug fix:* units now route **around** sealed-off regions instead of walking
   into the quarantine border and jamming; if the map changes mid-journey they

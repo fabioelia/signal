@@ -68,6 +68,7 @@ export function buildView(state, side) {
       eta: mine || u.type === 'worm' || sight.has(u.region) ? u.path?.length ?? 0 : null,
       detected: u.type === 'worm' ? !!u.detectedBy?.[enemyOf(u.owner)] : null,
       held: mine ? held : null,
+      path: mine ? [...(u.path || [])] : null, // your own routes, for the map overlay
     });
   }
 

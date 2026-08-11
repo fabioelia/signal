@@ -394,4 +394,12 @@ test('fog: view hides what it should', async () => {
   assert.ok(worm, 'worm exists in truth');
   const viewA2 = buildView(state, 'A');
   assert.ok(!viewA2.units.some((u) => u.type === 'worm'), 'stealth worm leaked into view');
+  // routes: your own units expose their path, enemy units never do
+  const viewB = buildView(state, 'B');
+  const wormB = viewB.units.find((u) => u.type === 'worm');
+  assert.ok(Array.isArray(wormB.path), 'own unit path exposed for the map overlay');
+  state.units.push({ id: state.nextId++, owner: 'B', type: 'swarm', region: 'norvane', target: 'vellmar', path: ['vellmar'], strength: 6 });
+  const viewA3 = buildView(state, 'A');
+  const enemySwarm = viewA3.units.find((u) => u.type === 'swarm' && u.owner === 'B');
+  if (enemySwarm) assert.equal(enemySwarm.path, null, 'enemy paths stay hidden');
 });
